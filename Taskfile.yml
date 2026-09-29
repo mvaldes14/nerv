@@ -1,0 +1,89 @@
+version: '3'
+
+vars:
+  IMAGE: '{{.IMAGE | default "ghcr.io/mvaldes14/nerv:dev"}}'
+  DATABASE_URL: 'postgres://nerv:nerv@localhost:5432/nerv?sslmode=disable'
+
+tasks:
+  default:
+    cmds:
+      - task --list
+
+  test:
+    desc: Run Go tests in Docker
+    cmds:
+      - docker run --rm -v "${PWD}:/src" -w /src golang:1.27-alpine go test ./...
+
+  vet:
+    desc: Run go vet in Docker
+    cmds:
+      - docker run --rm -v "${PWD}:/src" -w /src golang:1.27-alpine go vet ./...
+
+  run:ask:
+    desc: Run a local CLI investigation smoke test
+    env:
+      DATABASE_URL: '{{.DATABASE_URL}}'
+    cmds:
+      - go run ./cmd/nerv ask '{{.QUESTION | default "what is latency on service demo right now?"}}'
+
+  run:serve:
+    desc: Run the local HTTP API
+    env:
+      DATABASE_URL: '{{.DATABASE_URL}}'
+      NERV_AUTH_TOKEN: '{{.NERV_AUTH_TOKEN | default "dev-token"}}'
+    cmds:
+      - go run ./cmd/nerv serve
+
+  smoke:http:
+    desc: Call the local /ask endpoint
+    cmds:
+      - |
+        curl -sS -H 'Authorization: Bearer {{.NERV_AUTH_TOKEN | default "dev-token"}}' \
+          -H 'Content-Type: application/json' \
+          -d '{"question":"what is latency on service demo right now?"}' \
+          http://127.0.0.1:8080/ask | jq
+
+  smoke:alert:
+    desc: Call the local /alert endpoint with a sample SigNoz/Alertmanager webhook
+    cmds:
+      - |
+        curl -sS -H 'Authorization: Bearer {{.NERV_AUTH_TOKEN | default "dev-token"}}' \
+          -H 'Content-Type: application/json' \
+          --data-binary @testdata/signoz-alert.sample.json \
+          http://127.0.0.1:8080/alert | jq
+
+  db:up:
+    desc: Start temporary local PostgreSQL with Docker Compose
+    cmds:
+      - docker compose -f compose.postgres.yml up -d
+
+  db:down:
+    desc: Stop local PostgreSQL
+    cmds:
+      - docker compose -f compose.postgres.yml down
+
+  db:reset:
+    desc: Destroy and recreate local PostgreSQL volume
+    cmds:
+      - docker compose -f compose.postgres.yml down -v
+      - docker compose -f compose.postgres.yml up -d
+
+  docker:build:
+    desc: Build local container image
+    cmds:
+      - docker build -t {{.IMAGE}} .
+
+  deploy:build:
+    desc: Render kustomize manifests
+    cmds:
+      - kubectl kustomize deploy
+
+  deploy:diff:
+    desc: Diff manifests against the current kubectl context
+    cmds:
+      - kubectl diff -k deploy || true
+
+  deploy:apply:
+    desc: Apply manifests to the current kubectl context
+    cmds:
+      - kubectl apply -k deploy

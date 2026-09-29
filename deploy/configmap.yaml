@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nerv-config
+  labels:
+    app.kubernetes.io/name: nerv
+data:
+  NERV_ADDR: ":8080"
+  NERV_LLM_PROVIDER: "echo"
+  NERV_LLM_MODEL: "echo-v0"

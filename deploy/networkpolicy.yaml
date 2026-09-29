@@ -1,0 +1,40 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nerv-default-deny
+  labels:
+    app.kubernetes.io/name: nerv
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nerv
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Keep private by default: same-namespace traffic only. Add an overlay for
+    # Tailscale/private ingress or in-cluster Alertmanager.
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # PostgreSQL / internal services. Tighten in a cluster-specific overlay.
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 4317
+        - protocol: TCP
+          port: 4318
