@@ -1,0 +1,33 @@
+{
+  "receiver": "nerv",
+  "status": "firing",
+  "alerts": [
+    {
+      "status": "firing",
+      "labels": {
+        "alertname": "HighLatency",
+        "service": "demo",
+        "severity": "warning"
+      },
+      "annotations": {
+        "summary": "demo service latency is high",
+        "description": "p95 latency exceeded threshold"
+      },
+      "startsAt": "2026-09-29T20:00:00Z",
+      "endsAt": "0001-01-01T00:00:00Z",
+      "generatorURL": "https://signoz.example.local/alerts/demo",
+      "fingerprint": "demo-high-latency"
+    }
+  ],
+  "groupLabels": {
+    "alertname": "HighLatency"
+  },
+  "commonLabels": {
+    "alertname": "HighLatency",
+    "service": "demo"
+  },
+  "commonAnnotations": {
+    "summary": "demo service latency is high"
+  },
+  "externalURL": "https://signoz.example.local"
+}

@@ -1,0 +1,56 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nerv-default-deny
+  labels:
+    app.kubernetes.io/name: nerv
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nerv
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Same namespace, SigNoz alert delivery, and private Traefik ingress.
+    - from:
+        - podSelector: {}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: signoz
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: TCP
+          port: 8080
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Kubernetes API and internal PostgreSQL/AI/Gotify/OTLP services.
+    # Tighten destinations with namespace labels in the homelab overlay.
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 4317
+        - protocol: TCP
+          port: 4318
+    # Kubernetes API endpoint may resolve to node IPs outside namespace selectors.
+    - ports:
+        - protocol: TCP
+          port: 6443

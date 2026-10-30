@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nerv-config
+  labels:
+    app.kubernetes.io/name: nerv
+data:
+  NERV_ADDR: ":8080"
+  NERV_LLM_PROVIDER: "agentgateway"
+  NERV_LLM_MODEL: "openai/gpt-5-mini"
+  NERV_AGENTGATEWAY_URL: "http://agentgateway-proxy.agentgateway.svc.cluster.local"
+  NERV_DECISION_GATEWAY_URL: "http://decision-gateway.decision-gateway.svc.cluster.local:8080"
+  NERV_DECISION_NAME: "alert-disposition"
+  NERV_DECISION_VERSION: "v1"
+  NERV_GOTIFY_URL: "http://gotify-svc.gotify.svc.cluster.local"
+  NERV_HTTP_TIMEOUT: "30s"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "signoz-signoz-helm-otel-collector.signoz.svc.cluster.local:4317"
+  OTEL_EXPORTER_OTLP_INSECURE: "true"

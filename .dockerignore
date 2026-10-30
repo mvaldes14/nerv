@@ -1,0 +1,14 @@
+.git
+.gitignore
+Dockerfile
+README.md
+Taskfile.yml
+compose.postgres.yml
+.env
+.env.*
+!.env.example
+bin/
+coverage.txt
+.vscode/
+.idea/
+.DS_Store

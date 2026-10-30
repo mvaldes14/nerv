@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nerv-config
+data:
+  NERV_LLM_PROVIDER: echo
+  NERV_LLM_MODEL: echo-v0
+  NERV_AGENTGATEWAY_URL: ""
+  NERV_DECISION_GATEWAY_URL: ""
+  NERV_GOTIFY_URL: ""
+  OTEL_EXPORTER_OTLP_ENDPOINT: ""

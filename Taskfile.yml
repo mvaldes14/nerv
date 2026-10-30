@@ -1,0 +1,246 @@
+version: '3'
+
+vars:
+  IMAGE: '{{.IMAGE | default "ghcr.io/mvaldes14/nerv:dev"}}'
+  KUBE_CONTEXT: '{{.KUBE_CONTEXT | default "docker-desktop"}}'
+  DATABASE_URL: 'postgres://nerv:nerv@localhost:5432/nerv?sslmode=disable'
+
+tasks:
+  default:
+    cmds:
+      - task --list
+
+  test:
+    desc: Run Go tests in Docker
+    cmds:
+      - docker run --rm -v "${PWD}:/src" -w /src golang:1.27-alpine go test ./...
+
+  vet:
+    desc: Run go vet in Docker
+    cmds:
+      - docker run --rm -v "${PWD}:/src" -w /src golang:1.27-alpine go vet ./...
+
+  run:ask:
+    desc: Run a local CLI investigation smoke test
+    env:
+      DATABASE_URL: '{{.DATABASE_URL}}'
+      NERV_LLM_PROVIDER: echo
+      NERV_LLM_MODEL: echo-v0
+    cmds:
+      - go run ./cmd/nerv ask '{{.QUESTION | default "what is latency on service demo right now?"}}'
+
+  run:serve:
+    desc: Run the local HTTP API
+    env:
+      DATABASE_URL: '{{.DATABASE_URL}}'
+      NERV_AUTH_TOKEN: '{{.NERV_AUTH_TOKEN | default "dev-token"}}'
+      NERV_LLM_PROVIDER: echo
+      NERV_LLM_MODEL: echo-v0
+    cmds:
+      - go run ./cmd/nerv serve
+
+  smoke:http:
+    desc: Call the local /ask endpoint
+    cmds:
+      - |
+        curl -sS -H 'Authorization: Bearer {{.NERV_AUTH_TOKEN | default "dev-token"}}' \
+          -H 'Content-Type: application/json' \
+          -d '{"question":"what is latency on service demo right now?"}' \
+          http://127.0.0.1:8080/ask | jq
+
+  smoke:alert:
+    desc: Call the local /alert endpoint with a sample SigNoz/Alertmanager webhook
+    cmds:
+      - |
+        curl -sS -H 'Authorization: Bearer {{.NERV_AUTH_TOKEN | default "dev-token"}}' \
+          -H 'Content-Type: application/json' \
+          --data-binary @testdata/signoz-alert.sample.json \
+          http://127.0.0.1:8080/alert | jq
+
+  db:up:
+    desc: Start temporary local PostgreSQL with Docker Compose
+    cmds:
+      - docker compose -f compose.postgres.yml up -d
+
+  db:down:
+    desc: Stop local PostgreSQL
+    cmds:
+      - docker compose -f compose.postgres.yml down
+
+  db:reset:
+    desc: Destroy and recreate local PostgreSQL volume
+    cmds:
+      - docker compose -f compose.postgres.yml down -v
+      - docker compose -f compose.postgres.yml up -d
+
+  docker:build:
+    desc: Build local container image
+    cmds:
+      - docker build -t {{.IMAGE}} .
+
+  deploy:build:
+    desc: Render kustomize manifests
+    cmds:
+      - kubectl kustomize deploy
+
+  deploy:diff:
+    desc: Diff manifests against the current kubectl context
+    cmds:
+      - kubectl diff -k deploy || true
+
+  deploy:apply:
+    desc: Apply manifests to the current kubectl context
+    cmds:
+      - kubectl apply -k deploy
+
+  local:context:
+    desc: Verify isolated local Kubernetes context exists
+    cmds:
+      - |
+        set -eu
+        test "{{.KUBE_CONTEXT}}" != "homelab" || { echo "refusing local test against homelab" >&2; exit 1; }
+        kubectl --context "{{.KUBE_CONTEXT}}" cluster-info >/dev/null
+        echo "using Kubernetes context: {{.KUBE_CONTEXT}}"
+
+  local:render:
+    desc: Render isolated local Kubernetes overlay
+    cmds:
+      - kubectl kustomize deploy/local
+
+  local:build:
+    desc: Build image and load it into Docker Desktop Kubernetes
+    deps: [local:context]
+    cmds:
+      - |
+        set -eu
+        docker build -t nerv:dev .
+        if [ "{{.KUBE_CONTEXT}}" = "docker-desktop" ]; then
+          IMAGE_TAR="${TMPDIR:-/tmp}/nerv-dev-image.tar"
+          docker save nerv:dev -o "$IMAGE_TAR"
+          for NODE in $(kubectl --context "{{.KUBE_CONTEXT}}" get nodes -o name | cut -d/ -f2); do
+            docker exec -i "$NODE" ctr -n k8s.io images import - <"$IMAGE_TAR"
+          done
+          rm -f "$IMAGE_TAR"
+        fi
+
+  local:deploy:
+    desc: Deploy NERV and ephemeral PostgreSQL to isolated local Kubernetes
+    deps: [local:context]
+    cmds:
+      - kubectl --context "{{.KUBE_CONTEXT}}" apply -k deploy/local
+
+  local:wait:
+    desc: Wait for local PostgreSQL and NERV rollouts
+    deps: [local:context]
+    cmds:
+      - kubectl --context "{{.KUBE_CONTEXT}}" -n nerv rollout status deployment/postgres --timeout=180s
+      - kubectl --context "{{.KUBE_CONTEXT}}" -n nerv rollout status deployment/nerv --timeout=180s
+
+  local:up:
+    desc: Build and deploy complete isolated local stack
+    cmds:
+      - task: local:context
+      - task: local:build
+      - task: local:deploy
+      - task: local:wait
+
+  local:smoke:
+    desc: Test DBOS, PostgreSQL, HTTP intake, and in-cluster Kubernetes reads
+    deps: [local:context]
+    cmds:
+      - |
+        set -eu
+        PORT=18088
+        PF_LOG="${TMPDIR:-/tmp}/nerv-port-forward.log"
+        pkill -f "kubectl.*port-forward.*service/nerv.*$PORT:8080" 2>/dev/null || true
+        kubectl --context "{{.KUBE_CONTEXT}}" -n nerv port-forward service/nerv "$PORT:8080" >"$PF_LOG" 2>&1 &
+        PF_PID=$!
+
+        for i in $(seq 1 30); do
+          curl -fsS "http://127.0.0.1:$PORT/readyz" >/dev/null 2>&1 && break
+          sleep 1
+        done
+        curl -fsS "http://127.0.0.1:$PORT/readyz" | jq -e '.status == "ready"' >/dev/null
+
+        POD=$(kubectl --context "{{.KUBE_CONTEXT}}" -n nerv get pods \
+          -l app.kubernetes.io/name=nerv \
+          -o jsonpath='{.items[0].metadata.name}')
+
+        jq -n --arg pod "$POD" '{
+          question: "is the local NERV pod healthy?",
+          target: {namespace: "nerv", kind: "pod", name: $pod}
+        }' | curl -fsS \
+          -H 'Authorization: Bearer dev-token' \
+          -H 'Content-Type: application/json' \
+          --data-binary @- \
+          "http://127.0.0.1:$PORT/ask" | tee /tmp/nerv-local-ask.json | jq -e \
+          '.decision.action == "investigate" and (.evidence | map(.source) | index("kubernetes.describe")) != null' >/dev/null
+
+        ALERT=$(curl -fsS \
+          -H 'Authorization: Bearer dev-token' \
+          -H 'Content-Type: application/json' \
+          --data-binary @testdata/signoz-alert.sample.json \
+          "http://127.0.0.1:$PORT/alert")
+        ID=$(printf '%s' "$ALERT" | jq -er '.investigations[0].id')
+
+        for i in $(seq 1 30); do
+          STATUS=$(curl -sS -H 'Authorization: Bearer dev-token' \
+            "http://127.0.0.1:$PORT/investigations/$ID" | jq -r '.status // empty')
+          test "$STATUS" = "completed" && break
+          sleep 1
+        done
+        test "$STATUS" = "completed"
+        kill "$PF_PID" 2>/dev/null || true
+        echo "local smoke passed; incident=$ID"
+
+  local:recovery:
+    desc: Restart NERV and verify persisted investigation remains queryable
+    deps: [local:context]
+    cmds:
+      - |
+        set -eu
+        PORT=18088
+        PF_LOG="${TMPDIR:-/tmp}/nerv-port-forward.log"
+        pkill -f "kubectl.*port-forward.*service/nerv.*$PORT:8080" 2>/dev/null || true
+        kubectl --context "{{.KUBE_CONTEXT}}" -n nerv port-forward service/nerv "$PORT:8080" >"$PF_LOG" 2>&1 &
+        PF_PID=$!
+        for i in $(seq 1 30); do curl -fsS "http://127.0.0.1:$PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
+
+        ALERT=$(curl -fsS \
+          -H 'Authorization: Bearer dev-token' \
+          -H 'Content-Type: application/json' \
+          --data-binary @testdata/signoz-alert.sample.json \
+          "http://127.0.0.1:$PORT/alert")
+        ID=$(printf '%s' "$ALERT" | jq -er '.investigations[0].id')
+        for i in $(seq 1 30); do
+          STATUS=$(curl -sS -H 'Authorization: Bearer dev-token' "http://127.0.0.1:$PORT/investigations/$ID" | jq -r '.status // empty')
+          test "$STATUS" = "completed" && break
+          sleep 1
+        done
+        test "$STATUS" = "completed"
+        kill "$PF_PID" 2>/dev/null || true
+
+        kubectl --context "{{.KUBE_CONTEXT}}" -n nerv rollout restart deployment/nerv
+        kubectl --context "{{.KUBE_CONTEXT}}" -n nerv rollout status deployment/nerv --timeout=180s
+
+        kubectl --context "{{.KUBE_CONTEXT}}" -n nerv port-forward service/nerv "$PORT:8080" >"$PF_LOG" 2>&1 &
+        PF_PID=$!
+        for i in $(seq 1 30); do curl -fsS "http://127.0.0.1:$PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
+        curl -fsS -H 'Authorization: Bearer dev-token' \
+          "http://127.0.0.1:$PORT/investigations/$ID" | jq -e '.status == "completed"' >/dev/null
+        kill "$PF_PID" 2>/dev/null || true
+        echo "DBOS recovery smoke passed; incident=$ID"
+
+  local:logs:
+    desc: Follow local NERV logs
+    deps: [local:context]
+    cmds:
+      - kubectl --context "{{.KUBE_CONTEXT}}" -n nerv logs deployment/nerv -f
+
+  local:down:
+    desc: Delete isolated local Kubernetes stack and ephemeral data
+    cmds:
+      - |
+        set -eu
+        test "{{.KUBE_CONTEXT}}" != "homelab" || { echo "refusing local cleanup against homelab" >&2; exit 1; }
+        kubectl --context "{{.KUBE_CONTEXT}}" delete -k deploy/local --ignore-not-found

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">NERV mark</title>
+  <desc id="desc">A connected N with an incident signal</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#111827"/>
+      <stop offset="1" stop-color="#060912"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ff3d57"/>
+      <stop offset="1" stop-color="#ff9a3d"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="128" fill="url(#bg)"/>
+  <path d="M136 388V124l240 264V124" fill="none" stroke="#f8fafc" stroke-width="50" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M68 278h110l34-60 54 126 48-94 34 58h96" fill="none" stroke="url(#accent)" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="68" cy="278" r="16" fill="#ff3d57"/>
+  <circle cx="444" cy="308" r="16" fill="#ff9a3d"/>
+</svg>
