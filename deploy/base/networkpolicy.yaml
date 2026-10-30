@@ -12,10 +12,15 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # Keep private by default: same-namespace traffic only. Add an overlay for
-    # Tailscale/private ingress or in-cluster Alertmanager.
+    # Same namespace, SigNoz alert delivery, and private Traefik ingress.
     - from:
         - podSelector: {}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: signoz
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
       ports:
         - protocol: TCP
           port: 8080
@@ -28,13 +33,24 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
-    # PostgreSQL / internal services. Tighten in a cluster-specific overlay.
+    # Kubernetes API and internal PostgreSQL/AI/Gotify/OTLP services.
+    # Tighten destinations with namespace labels in the homelab overlay.
     - to:
         - namespaceSelector: {}
       ports:
         - protocol: TCP
+          port: 80
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
           port: 5432
+        - protocol: TCP
+          port: 8080
         - protocol: TCP
           port: 4317
         - protocol: TCP
           port: 4318
+    # Kubernetes API endpoint may resolve to node IPs outside namespace selectors.
+    - ports:
+        - protocol: TCP
+          port: 6443

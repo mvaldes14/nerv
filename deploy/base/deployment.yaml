@@ -30,7 +30,7 @@ spec:
               containerPort: 8080
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: http
             initialDelaySeconds: 2
             periodSeconds: 10
@@ -54,5 +54,8 @@ spec:
             capabilities:
               drop: ["ALL"]
       securityContext:
+        runAsUser: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault

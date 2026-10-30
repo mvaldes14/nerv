@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  labels:
+    app.kubernetes.io/name: nerv-postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nerv-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nerv-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          env:
+            - name: POSTGRES_DB
+              value: nerv
+            - name: POSTGRES_USER
+              value: nerv
+            - name: POSTGRES_PASSWORD
+              value: nerv
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "nerv", "-d", "nerv"]
+            initialDelaySeconds: 2
+            periodSeconds: 2
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  labels:
+    app.kubernetes.io/name: nerv-postgres
+spec:
+  selector:
+    app.kubernetes.io/name: nerv-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres

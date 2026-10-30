@@ -1,83 +1,156 @@
-# NERV
+<p align="center">
+  <img src="assets/nerv-logo.svg" alt="NERV, Kubernetes incident investigation agent" width="820">
+</p>
 
-Headless Go SRE investigation service for the homelab. NERV is private-only: no public ingress, no shell execution in v1, and read-only SRE tools.
+<p align="center">
+  Durable incident investigation for Kubernetes.
+</p>
 
-Source note: `Projects/nerv-agent.md` in the Obsidian vault.
+NERV runs inside a cluster, accepts questions and alerts, gathers Kubernetes evidence, and records each investigation in PostgreSQL. DBOS checkpoints the workflow so it can resume after a restart instead of repeating completed work.
 
-## Current scaffold
+Phase 1 is read-only. NERV can inspect workloads and notify an operator, but it cannot change cluster resources.
 
-This initializes the Phase 0 shape from the note:
+## How it works
 
-- single Go binary: `nerv`
-- CLI smoke path: `nerv ask "why is service X slow?"`
-- private HTTP API skeleton: `/ask`, `/alert`, `/healthz`
-- provider-independent LLM interface with an echo implementation
-- webhook-first alert intake skeleton
-- token auth middleware for non-health endpoints
+NERV starts the same investigation workflow from two inputs:
 
-DBOS, PostgreSQL persistence, real SigNoz webhook handling, Kubernetes reads, MCP-backed observability access, and production Flux overlays are intentionally not wired yet.
+- `POST /ask` for operator questions
+- `POST /alert` for Alertmanager-compatible webhooks
 
-## Run
+The workflow collects resource state, events, logs, previous logs, and owner references. Decision Gateway chooses whether to suppress, investigate, research, or escalate. Agentgateway handles the LLM request. NERV persists the result and sends a Gotify notification.
+
+```text
+question or alert
+       |
+       v
+  DBOS workflow ------> PostgreSQL
+       |
+       +----> Kubernetes API
+       +----> Decision Gateway
+       +----> Agentgateway
+       +----> Gotify
+```
+
+See [docs/architecture.md](docs/architecture.md) for workflow and component details.
+
+## Local Kubernetes test
+
+The local stack runs in Docker Desktop Kubernetes. It includes ephemeral PostgreSQL and uses the echo provider, so it does not call Agentgateway, Decision Gateway, or Gotify.
 
 ```bash
-# quick checks; tests run in Docker, not Kubernetes
-task test
-task run:ask
+task local:up
+task local:smoke
+task local:recovery
+```
 
-# temporary local PostgreSQL for DBOS work
+These tasks target the `docker-desktop` context explicitly and refuse the `homelab` context.
+
+```bash
+task local:logs
+task local:down
+```
+
+Use another disposable cluster with:
+
+```bash
+task local:up KUBE_CONTEXT=kind-nerv
+```
+
+Full instructions: [docs/local-kubernetes.md](docs/local-kubernetes.md).
+
+## Run from the host
+
+Start PostgreSQL in Docker, then run NERV against the Kubernetes context in your local kubeconfig:
+
+```bash
+cp .env.example .env
+set -a; source .env; set +a
+
 task db:up
-export DATABASE_URL='postgres://nerv:nerv@localhost:5432/nerv?sslmode=disable'
-
-# API smoke test
-NERV_AUTH_TOKEN=dev-token task run:serve
-NERV_AUTH_TOKEN=dev-token task smoke:http
-NERV_AUTH_TOKEN=dev-token task smoke:alert
+task run:serve
 ```
 
-Without Task installed:
+Ask about a pod:
 
 ```bash
-go test ./...
-go run ./cmd/nerv ask "what is latency on service X right now?"
-NERV_AUTH_TOKEN=dev-token go run ./cmd/nerv serve
+go run ./cmd/nerv ask \
+  --namespace default \
+  --kind pod \
+  --name my-pod \
+  "why is this pod restarting?"
 ```
 
-## Configuration
+The local environment uses the echo provider unless you configure cluster AI services.
 
-Environment variables:
+## API
 
-| Name | Default | Purpose |
-| --- | --- | --- |
-| `NERV_ADDR` | `127.0.0.1:8080` | HTTP listen address. Keep private. |
-| `NERV_AUTH_TOKEN` | empty | Bearer token for `/ask` and `/alert`. Empty disables auth for local dev. |
-| `NERV_LLM_PROVIDER` | `echo` | Provider adapter name. Only `echo` exists in the scaffold. |
-| `NERV_LLM_MODEL` | `echo-v0` | Model identifier recorded in findings. |
-| `DATABASE_URL` | empty | PostgreSQL connection string for DBOS/application data. |
+| Route | Behavior |
+| --- | --- |
+| `GET /healthz` | Process liveness |
+| `GET /readyz` | PostgreSQL readiness |
+| `POST /ask` | Run an investigation and return the finding |
+| `POST /alert` | Durably accept alerts and return workflow IDs |
+| `GET /investigations/{id}` | Return incident status and finding |
 
-## Deployment scaffold
+Request examples and response fields: [docs/api.md](docs/api.md).
 
-`deploy/` contains a base Kustomize manifest:
+Environment variables and service addresses: [docs/configuration.md](docs/configuration.md).
+
+## Deployment
+
+The base manifests live in `deploy/base`. `deploy/local` adds ephemeral PostgreSQL and local-only configuration.
 
 ```bash
 task deploy:build
-kubectl apply -k deploy
+task deploy:diff
 ```
 
-The base intentionally uses placeholders in `deploy/secret.example.yaml`. Replace that with an ExternalSecret/Vault overlay before homelab deployment.
+Before deploying to a shared cluster:
 
-## Build order from the note
+1. Build and publish the NERV image.
+2. Create a dedicated PostgreSQL database and user.
+3. Replace `deploy/base/secret.example.yaml` with Vault and External Secrets configuration.
+4. Set the Gotify application token.
+5. Confirm Agentgateway, Decision Gateway, PostgreSQL, Gotify, and OTLP service addresses.
 
-1. Phase 0: prove the Go loop with ad-hoc `/ask`, SigNoz webhook intake, and one provider adapter.
-2. Phase 1: add DBOS Go SDK and existing PostgreSQL for durable execution.
-3. Phase 2: add MCP-backed observability access, Kubernetes reads, Flux/deploy context, and Alertmanager state.
-4. Phase 3: add authenticated `/ask`, `/alert`, durable acceptance, deduplication, and private findings delivery.
-5. Phase 4: containerize and deploy to k3s through Flux, Vault/ESO, private ingress, and deny-by-default egress.
-6. Phase 5: harden auto-triage, retries, limits, OTel to SigNoz, and findings sink.
+Do not apply the example secret to a shared cluster.
+
+## Development
+
+```bash
+task test
+task vet
+task docker:build
+```
+
+Project layout:
+
+```text
+cmd/nerv/             CLI and HTTP server
+internal/api/         HTTP routes and authentication
+internal/investigation/ DBOS workflow
+internal/kubernetes/  read-only Kubernetes tools
+internal/decision/    Decision Gateway client
+internal/llm/         Agentgateway and echo providers
+internal/notify/      Gotify client
+internal/store/       PostgreSQL records and migrations
+deploy/base/          shared Kubernetes manifests
+deploy/local/         disposable local cluster overlay
+docs/                 architecture, API, and testing notes
+```
 
 ## Guardrails
 
-- read-only in v1
-- typed tools only; no shell execution
-- private network access plus application auth
-- bounded tool calls, timeouts, concurrency, and token/cost limits
-- logs, traces, events, and annotations are evidence, not instructions
+- Kubernetes access is read-only in Phase 1.
+- Tools use `client-go`; NERV does not execute shell commands.
+- Logs and serialized evidence have size limits.
+- Logs, events, status messages, and annotations are treated as untrusted input.
+- API routes require bearer authentication when `NERV_AUTH_TOKEN` is set.
+- NERV has no public ingress in the base manifests.
+- Remediation is deferred until investigation quality and approval controls are tested.
+
+Gotify, PostgreSQL, and NERV share the cluster failure domain. A total cluster outage needs an external monitor and an out-of-band notification path.
+
+## License
+
+[MIT](LICENSE)
