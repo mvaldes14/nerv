@@ -145,6 +145,7 @@ docs/                 architecture, API, and testing notes
 - Tools use `client-go`; NERV does not execute shell commands.
 - Logs and serialized evidence have size limits.
 - Logs, events, status messages, and annotations are treated as untrusted input.
+- GenAI telemetry records operation metadata and token usage, not prompts, evidence, model output, or tool payloads.
 - API routes require bearer authentication when `NERV_AUTH_TOKEN` is set.
 - NERV has no public ingress in the base manifests.
 - Remediation is deferred until investigation quality and approval controls are tested.

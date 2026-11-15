@@ -101,7 +101,7 @@ func (h *Handler) alert(w http.ResponseWriter, r *http.Request) {
 	accepted := make([]investigation.Accepted, 0, len(payload.Alerts))
 	for _, alert := range payload.Alerts {
 		req := alertRequest(payload.Receiver, alert)
-		item, err := h.service.Accept(req)
+		item, err := h.service.Accept(r.Context(), req)
 		if err != nil {
 			h.logger.Error("alert acceptance failed", "error", err, "fingerprint", alert.Fingerprint)
 			writeError(w, http.StatusServiceUnavailable, "failed to durably accept alert")

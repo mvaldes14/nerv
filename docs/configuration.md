@@ -19,7 +19,7 @@ NERV reads configuration from environment variables. The Kubernetes manifests lo
 | `NERV_GOTIFY_URL` | empty | Gotify base URL; empty disables delivery |
 | `NERV_GOTIFY_TOKEN` | empty | Gotify application token |
 | `NERV_HTTP_TIMEOUT` | `30s` | Outbound HTTP timeout |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | empty | OTLP gRPC host and port; empty disables trace export |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | empty | OTLP gRPC host and port; empty disables HTTP, service, and GenAI trace export |
 | `OTEL_EXPORTER_OTLP_INSECURE` | `true` | Use plaintext OTLP gRPC |
 
 ## Local host configuration
@@ -58,3 +58,7 @@ signoz-signoz-helm-otel-collector.signoz.svc.cluster.local:4317
 ```
 
 A different cluster should patch these values instead of editing application code.
+
+## Telemetry content policy
+
+NERV emits GenAI operation metadata such as model names, token counts, finish reasons, and errors. It does not export prompts, Kubernetes evidence, model responses, system instructions, or tool arguments/results. Content capture must remain opt-in if added later and must apply redaction and size limits before export.
