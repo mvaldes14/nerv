@@ -14,6 +14,7 @@ import (
 )
 
 func Setup(ctx context.Context, serviceName, endpoint string, insecure bool) (func(context.Context) error, error) {
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 	if endpoint == "" {
 		return func(context.Context) error { return nil }, nil
 	}
@@ -37,6 +38,5 @@ func Setup(ctx context.Context, serviceName, endpoint string, insecure bool) (fu
 		sdktrace.WithResource(res),
 	)
 	otel.SetTracerProvider(provider)
-	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 	return provider.Shutdown, nil
 }

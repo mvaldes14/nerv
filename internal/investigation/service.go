@@ -10,6 +10,7 @@ import (
 
 	"github.com/dbos-inc/dbos-transact-golang/dbos"
 	"github.com/google/uuid"
+	"github.com/mvaldes14/nerv/internal/telemetry"
 )
 
 type Request struct {
@@ -20,6 +21,8 @@ type Request struct {
 	Target         *Target           `json:"target,omitempty"`
 	Labels         map[string]string `json:"labels,omitempty"`
 	Annotations    map[string]string `json:"annotations,omitempty"`
+	TraceParent    string            `json:"traceparent,omitempty"`
+	TraceState     string            `json:"tracestate,omitempty"`
 }
 
 type Target struct {
@@ -93,21 +96,25 @@ type Notifier interface {
 }
 
 type Dependencies struct {
-	DBOS      dbos.Context
-	LLM       LLM
-	Collector Collector
-	Decision  DecisionEngine
-	Store     Store
-	Notifier  Notifier
+	DBOS          dbos.Context
+	LLM           LLM
+	Collector     Collector
+	Decision      DecisionEngine
+	Store         Store
+	Notifier      Notifier
+	AgentProvider string
+	AgentModel    string
 }
 
 type Service struct {
-	dbos      dbos.Context
-	llm       LLM
-	collector Collector
-	decision  DecisionEngine
-	store     Store
-	notifier  Notifier
+	dbos          dbos.Context
+	llm           LLM
+	collector     Collector
+	decision      DecisionEngine
+	store         Store
+	notifier      Notifier
+	agentProvider string
+	agentModel    string
 }
 
 func NewService(deps Dependencies) (*Service, error) {
@@ -127,12 +134,14 @@ func NewService(deps Dependencies) (*Service, error) {
 		notifier = noopNotifier{}
 	}
 	s := &Service{
-		dbos:      deps.DBOS,
-		llm:       deps.LLM,
-		collector: deps.Collector,
-		decision:  decision,
-		store:     deps.Store,
-		notifier:  notifier,
+		dbos:          deps.DBOS,
+		llm:           deps.LLM,
+		collector:     deps.Collector,
+		decision:      decision,
+		store:         deps.Store,
+		notifier:      notifier,
+		agentProvider: deps.AgentProvider,
+		agentModel:    deps.AgentModel,
 	}
 	dbos.RegisterWorkflow(deps.DBOS, s.Investigate,
 		dbos.WithInstance(s),
@@ -144,8 +153,9 @@ func NewService(deps Dependencies) (*Service, error) {
 
 func (s *Service) ConfigName() string { return "nerv-investigation-service" }
 
-func (s *Service) Accept(req Request) (Accepted, error) {
+func (s *Service) Accept(ctx context.Context, req Request) (Accepted, error) {
 	req = normalizeRequest(req)
+	req.TraceParent, req.TraceState = telemetry.CaptureTraceContext(ctx)
 	if req.Question == "" {
 		return Accepted{}, fmt.Errorf("question is required")
 	}
@@ -165,7 +175,7 @@ func (s *Service) Accept(req Request) (Accepted, error) {
 }
 
 func (s *Service) Ask(ctx context.Context, req Request) (Finding, error) {
-	accepted, err := s.Accept(req)
+	accepted, err := s.Accept(ctx, req)
 	if err != nil {
 		return Finding{}, err
 	}
@@ -193,8 +203,10 @@ func (s *Service) Ready(ctx context.Context) error {
 	return s.store.Ping(ctx)
 }
 
-func (s *Service) Investigate(ctx dbos.Context, req Request) (Finding, error) {
+func (s *Service) Investigate(ctx dbos.Context, req Request) (finding Finding, workflowErr error) {
 	workflowID, _ := dbos.GetWorkflowID(ctx)
+	agentCtx, agentSpan := telemetry.StartWorkflow(context.Background(), s.agentProvider, s.agentModel, req.TraceParent, req.TraceState)
+	defer func() { agentSpan.End(workflowErr, "") }()
 
 	_, err := dbos.RunAsStep(ctx, func(stepCtx context.Context) (string, error) {
 		return "persisted", s.store.SaveIncident(stepCtx, workflowID, req, "running")
@@ -208,7 +220,7 @@ func (s *Service) Investigate(ctx dbos.Context, req Request) (Finding, error) {
 		if s.collector == nil {
 			return base, nil
 		}
-		collected, collectErr := s.collector.Collect(stepCtx, req)
+		collected, collectErr := s.collector.Collect(telemetry.WithSpan(stepCtx, agentCtx), req)
 		if collectErr != nil {
 			base = append(base, Evidence{Source: "kubernetes", Summary: "evidence collection failed: " + collectErr.Error()})
 			return base, nil
@@ -236,7 +248,7 @@ func (s *Service) Investigate(ctx dbos.Context, req Request) (Finding, error) {
 	generation := Generation{Answer: "Investigation suppressed by policy.", Provider: decision.Provider}
 	if decision.Action != "suppress" {
 		generation, err = dbos.RunAsStep(ctx, func(stepCtx context.Context) (Generation, error) {
-			answer, provider, model, generateErr := s.llm.Generate(stepCtx, buildPrompt(req, decision), evidence)
+			answer, provider, model, generateErr := s.llm.Generate(telemetry.WithSpan(stepCtx, agentCtx), buildPrompt(req, decision), evidence)
 			return Generation{Answer: answer, Provider: provider, Model: model}, generateErr
 		}, dbos.WithStepName("agentgateway-llm"), dbos.WithStepMaxRetries(2))
 		if err != nil {
@@ -244,7 +256,7 @@ func (s *Service) Investigate(ctx dbos.Context, req Request) (Finding, error) {
 		}
 	}
 
-	finding, err := dbos.RunAsStep(ctx, func(context.Context) (Finding, error) {
+	finding, err = dbos.RunAsStep(ctx, func(context.Context) (Finding, error) {
 		return Finding{
 			ID:         req.ID,
 			WorkflowID: workflowID,

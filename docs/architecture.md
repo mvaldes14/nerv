@@ -13,7 +13,7 @@ NERV is a Go service that runs inside Kubernetes. It uses DBOS for durable execu
 | Decision Gateway | Classify alert disposition and urgency |
 | Agentgateway | Route OpenAI-compatible LLM requests |
 | Gotify | Deliver investigation findings |
-| OpenTelemetry | Export HTTP and service traces |
+| OpenTelemetry | Export HTTP, service, and GenAI semantic-convention traces |
 
 ## Investigation workflow
 
@@ -32,6 +32,16 @@ Both `/ask` and `/alert` start `nerv.investigate`.
 11. Mark the incident complete.
 
 External calls and database writes run as separate DBOS steps. Recovery reuses completed step results.
+
+## GenAI telemetry
+
+Agentgateway inference emits OpenTelemetry GenAI semantic-convention spans. Each OpenAI-compatible request creates a `chat <model>` client span with operation, provider, requested and returned model, response ID, finish reasons, token usage, server address, and low-cardinality error type when available. The underlying HTTP request is also instrumented for propagation and transport diagnostics.
+
+Prompt text, Kubernetes evidence, model output, system instructions, and tool payloads are not recorded in telemetry. These fields can contain credentials, personal data, or untrusted workload content.
+
+The current deterministic investigation emits an `invoke_workflow NERV` internal span with `execute_tool <tool>` child spans for Kubernetes evidence collection. When the bounded loop allows the model to control tool selection, that agent-controlled section will emit `invoke_agent NERV`. DBOS recovery does not depend on keeping one span open across process restarts: intake trace context is serialized into workflow input, and each execution or recovery attempt links back to the originating intake span.
+
+Telemetry conformance will be checked against a pinned GenAI semantic-convention registry with OpenTelemetry Weaver. Semantic violations should fail the conformance test; coverage reporting remains non-blocking.
 
 ## Incident identity
 

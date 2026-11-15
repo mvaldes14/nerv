@@ -114,12 +114,14 @@ func buildService(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	}
 
 	svc, err := investigation.NewService(investigation.Dependencies{
-		DBOS:      dbosCtx,
-		LLM:       provider,
-		Collector: collector,
-		Decision:  decisionEngine,
-		Store:     postgres,
-		Notifier:  notifier,
+		DBOS:          dbosCtx,
+		LLM:           provider,
+		Collector:     collector,
+		Decision:      decisionEngine,
+		Store:         postgres,
+		Notifier:      notifier,
+		AgentProvider: cfg.LLMProvider,
+		AgentModel:    cfg.LLMModel,
 	})
 	if err != nil {
 		cleanup()

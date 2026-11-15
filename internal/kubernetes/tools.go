@@ -17,6 +17,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/mvaldes14/nerv/internal/investigation"
+	"github.com/mvaldes14/nerv/internal/telemetry"
 )
 
 const maxEvidenceBytes = 32 * 1024
@@ -60,27 +61,39 @@ func (c *Client) Collect(ctx context.Context, req investigation.Request) ([]inve
 	}
 	var evidence []investigation.Evidence
 
-	description, err := c.DescribeResource(ctx, target.Namespace, kind, target.Name)
+	describeCtx, describeSpan := telemetry.StartTool(ctx, "describe_resource", "function", "")
+	description, err := c.DescribeResource(describeCtx, target.Namespace, kind, target.Name)
+	describeSpan.End(err, "")
 	if err != nil {
 		return nil, err
 	}
 	evidence = append(evidence, investigation.Evidence{Source: "kubernetes.describe", Summary: description})
 
-	events, err := c.ListEvents(ctx, target.Namespace, kind, target.Name)
+	eventsCtx, eventsSpan := telemetry.StartTool(ctx, "list_events", "function", "")
+	events, err := c.ListEvents(eventsCtx, target.Namespace, kind, target.Name)
+	eventsSpan.End(err, "")
 	if err == nil && len(events) > 0 {
 		evidence = append(evidence, investigation.Evidence{Source: "kubernetes.events", Summary: events})
 	}
 
 	if kind == "pod" || kind == "pods" {
-		logs, logErr := c.GetPodLogs(ctx, target.Namespace, target.Name, target.Container, false, 200)
+		logsCtx, logsSpan := telemetry.StartTool(ctx, "get_pod_logs", "function", "")
+		logs, logErr := c.GetPodLogs(logsCtx, target.Namespace, target.Name, target.Container, false, 200)
+		logsSpan.End(logErr, "")
 		if logErr == nil && strings.TrimSpace(logs) != "" {
 			evidence = append(evidence, investigation.Evidence{Source: "kubernetes.logs", Summary: logs})
 		}
-		previous, previousErr := c.GetPodLogs(ctx, target.Namespace, target.Name, target.Container, true, 200)
+
+		previousCtx, previousSpan := telemetry.StartTool(ctx, "get_previous_pod_logs", "function", "")
+		previous, previousErr := c.GetPodLogs(previousCtx, target.Namespace, target.Name, target.Container, true, 200)
+		previousSpan.End(previousErr, "")
 		if previousErr == nil && strings.TrimSpace(previous) != "" {
 			evidence = append(evidence, investigation.Evidence{Source: "kubernetes.previous_logs", Summary: previous})
 		}
-		owners, ownerErr := c.GetOwnerChain(ctx, target.Namespace, target.Name)
+
+		ownersCtx, ownersSpan := telemetry.StartTool(ctx, "get_owner_chain", "function", "")
+		owners, ownerErr := c.GetOwnerChain(ownersCtx, target.Namespace, target.Name)
+		ownersSpan.End(ownerErr, "")
 		if ownerErr == nil && owners != "" {
 			evidence = append(evidence, investigation.Evidence{Source: "kubernetes.owner_chain", Summary: owners})
 		}
