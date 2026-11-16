@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  go:
+    uses: mvaldes14/gh-actions/.github/workflows/go-ci.yml@main
+    with:
+      lint: false
+
+  image:
+    needs: go
+    permissions:
+      contents: read
+      packages: write
+    uses: mvaldes14/gh-actions/.github/workflows/docker-build-push.yml@main
+    with:
+      image: mvaldes14/nerv
+      cache-scope: nerv
+      tags: |
+        type=ref,event=branch
+        type=ref,event=pr
+        type=ref,event=tag
+        type=sha,format=short
+        type=raw,value=dev,enable={{is_default_branch}}
+        type=raw,value=latest,enable={{is_default_branch}}
