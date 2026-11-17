@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -403,24 +404,28 @@ WHERE true`)
 	args := make([]any, 0, 6)
 	add := func(clause string, value any) {
 		args = append(args, value)
-		query.WriteString(fmt.Sprintf(clause, len(args)))
+		query.WriteString(clause)
+		query.WriteByte('$')
+		query.WriteString(strconv.Itoa(len(args)))
 	}
 	if filter.Source != "" {
-		add(" AND i.source = $%d", filter.Source)
+		add(" AND i.source = ", filter.Source)
 	}
 	if filter.Status != "" {
-		add(" AND i.status = $%d", filter.Status)
+		add(" AND i.status = ", filter.Status)
 	}
 	if filter.Namespace != "" {
-		add(" AND i.target->>'namespace' = $%d", filter.Namespace)
+		add(" AND i.target->>'namespace' = ", filter.Namespace)
 	}
 	if filter.Workload != "" {
-		add(" AND i.target->>'name' = $%d", filter.Workload)
+		add(" AND i.target->>'name' = ", filter.Workload)
 	}
 	args = append(args, filter.Limit+1)
-	query.WriteString(fmt.Sprintf(" ORDER BY i.created_at DESC, i.id DESC LIMIT $%d", len(args)))
+	query.WriteString(" ORDER BY i.created_at DESC, i.id DESC LIMIT $")
+	query.WriteString(strconv.Itoa(len(args)))
 	args = append(args, filter.Offset)
-	query.WriteString(fmt.Sprintf(" OFFSET $%d", len(args)))
+	query.WriteString(" OFFSET $")
+	query.WriteString(strconv.Itoa(len(args)))
 	return query.String(), args
 }
 

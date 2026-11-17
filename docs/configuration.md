@@ -44,7 +44,7 @@ Set the configured maintenance annotation on a Pod or workload to suppress auton
 
 ## Operator UI authentication
 
-The embedded UI is available at `/ui/`. Its static shell can load without credentials, but incident reads and `/ask` submissions call protected NERV APIs. The operator enters `NERV_AUTH_TOKEN` in the browser; the UI stores it only in per-tab `sessionStorage` and sends it as a bearer token. NERV does not render the token into HTML or JavaScript. Keep the service private and set `NERV_AUTH_TOKEN` outside isolated local development.
+The embedded UI is available at `/ui/`. Its static shell can load without credentials, but incident reads and `/ask` submissions call protected NERV APIs. The operator enters `NERV_AUTH_TOKEN` in the browser; the UI stores it only in per-tab `sessionStorage` with a 30-minute expiry and sends it as a bearer token. NERV does not render the token into HTML or JavaScript. Keep the service private and set `NERV_AUTH_TOKEN` outside isolated local development.
 
 ## Local host configuration
 

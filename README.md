@@ -72,7 +72,7 @@ task db:up
 task run:serve
 ```
 
-Open `http://127.0.0.1:8080/ui/`, enter the `NERV_AUTH_TOKEN`, then browse incidents or submit a question. The UI keeps the token in browser `sessionStorage` only and calls NERV HTTP APIs; it never connects directly to PostgreSQL, Kubernetes, SigNoz, or ClickHouse.
+Open `http://127.0.0.1:8080/ui/`, enter the `NERV_AUTH_TOKEN`, then browse incidents or submit a question. The UI keeps the token in browser `sessionStorage` for at most 30 minutes and calls NERV HTTP APIs; it never connects directly to PostgreSQL, Kubernetes, SigNoz, or ClickHouse.
 
 Ask about a pod from the CLI:
 
@@ -153,7 +153,7 @@ docs/                 architecture, API, and testing notes
 - Logs, events, status messages, and annotations are treated as untrusted input.
 - GenAI telemetry records operation metadata and token usage, not prompts, evidence, model output, or tool payloads.
 - API routes require bearer authentication when `NERV_AUTH_TOKEN` is set. Configure it for every private or shared deployment.
-- Operator UI stores bearer token in per-tab `sessionStorage`; token is never embedded in served HTML or JavaScript.
+- Operator UI stores bearer token in per-tab `sessionStorage` with a 30-minute expiry; token is never embedded in served HTML or JavaScript.
 - NERV has no public ingress in the base manifests.
 - Remediation is deferred until investigation quality and approval controls are tested.
 

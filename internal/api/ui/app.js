@@ -2,6 +2,8 @@
   'use strict';
 
   const tokenKey = 'nerv.operator.token';
+  const tokenExpiryKey = 'nerv.operator.token-expires';
+  const tokenTTL = 30 * 60 * 1000;
   const pageSize = 25;
   let offset = 0;
   let hasMore = false;
@@ -13,21 +15,46 @@
   const tokenInput = $('#token');
   const connection = $('#connection');
 
-  function token() { return sessionStorage.getItem(tokenKey) || ''; }
+  function clearToken() {
+    sessionStorage.removeItem(tokenKey);
+    sessionStorage.removeItem(tokenExpiryKey);
+  }
+
+  function token() {
+    const value = sessionStorage.getItem(tokenKey) || '';
+    const expires = Number(sessionStorage.getItem(tokenExpiryKey) || 0);
+    if (!value || !expires || Date.now() >= expires) {
+      clearToken();
+      return '';
+    }
+    return value;
+  }
+
+  function saveToken(value) {
+    sessionStorage.setItem(tokenKey, value);
+    sessionStorage.setItem(tokenExpiryKey, String(Date.now() + tokenTTL));
+  }
 
   function setConnection() {
     const connected = Boolean(token());
-    connection.textContent = connected ? 'Token in this session' : 'Token required';
+    connection.textContent = connected ? 'Token active for 30 minutes' : 'Token required';
     connection.className = connected ? 'pill' : 'pill muted';
   }
 
   async function api(path, options = {}) {
     const headers = new Headers(options.headers || {});
-    if (token()) headers.set('Authorization', `Bearer ${token()}`);
+    const bearer = token();
+    if (bearer) headers.set('Authorization', `Bearer ${bearer}`);
     if (options.body) headers.set('Content-Type', 'application/json');
     const response = await fetch(path, {...options, headers});
-    let body = null;
-    try { body = await response.json(); } catch (_) { body = {}; }
+    let body = {};
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      try { body = await response.json(); } catch (_) { body = {}; }
+    } else {
+      const responseText = await response.text();
+      body = {error: responseText || `Unexpected response type: ${contentType || 'unknown'}`};
+    }
     if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`);
     return body;
   }
@@ -205,8 +232,8 @@
   $('#auth-form').addEventListener('submit', (event) => {
     event.preventDefault();
     const value = tokenInput.value.trim();
-    if (value) sessionStorage.setItem(tokenKey, value);
-    else sessionStorage.removeItem(tokenKey);
+    if (value) saveToken(value);
+    else clearToken();
     tokenInput.value = '';
     setConnection();
     offset = 0;
@@ -214,7 +241,7 @@
   });
 
   $('#forget-token').addEventListener('click', () => {
-    sessionStorage.removeItem(tokenKey);
+    clearToken();
     tokenInput.value = '';
     setConnection();
     list.replaceChildren();

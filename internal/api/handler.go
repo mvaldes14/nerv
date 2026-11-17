@@ -136,6 +136,14 @@ func (h *Handler) listInvestigations(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if limit < 0 || limit > investigation.MaxIncidentLimit {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("limit must be between 0 and %d", investigation.MaxIncidentLimit))
+		return
+	}
+	if offset < 0 || offset > investigation.MaxIncidentOffset {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("offset must be between 0 and %d", investigation.MaxIncidentOffset))
+		return
+	}
 	page, err := h.service.List(r.Context(), investigation.IncidentFilter{
 		Limit:     limit,
 		Offset:    offset,

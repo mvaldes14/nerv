@@ -187,7 +187,7 @@ Evidence/tool output is returned separately from the model-generated finding. `c
 
 ### `GET /ui/`
 
-Serves the embedded server-rendered shell, CSS, and minimal vanilla JavaScript from the same Go binary. Enter the bearer token in the UI; it is stored only in browser `sessionStorage` and sent in the `Authorization` header for `/ask` and investigation API requests. It is never inserted into HTML, JavaScript, URLs, or server logs.
+Serves the embedded server-rendered shell, CSS, and minimal vanilla JavaScript from the same Go binary. Enter the bearer token in the UI; it is stored only in browser `sessionStorage` with a 30-minute expiry and sent in the `Authorization` header for `/ask` and investigation API requests. It is never inserted into HTML, JavaScript, URLs, or server logs.
 
 The UI talks only to NERV HTTP endpoints. It has no direct PostgreSQL, Kubernetes, SigNoz, or ClickHouse access. Richer filtering, Gotify deep links, and remediation approval controls are deferred.
 

@@ -87,14 +87,24 @@ func TestInvestigationHistoryPassesFilters(t *testing.T) {
 	}
 }
 
-func TestInvestigationHistoryRejectsInvalidLimit(t *testing.T) {
+func TestInvestigationHistoryRejectsInvalidPagination(t *testing.T) {
 	handler := NewHandler(Dependencies{Service: &fakeInvestigationService{}, AuthToken: "secret"})
-	req := httptest.NewRequest(http.MethodGet, "/investigations?limit=many", nil)
-	req.Header.Set("Authorization", "Bearer secret")
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, req)
-	if response.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
+	for _, query := range []string{
+		"limit=many",
+		"limit=-1",
+		"limit=101",
+		"offset=-1",
+		"offset=10001",
+	} {
+		t.Run(query, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/investigations?"+query, nil)
+			req.Header.Set("Authorization", "Bearer secret")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, req)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", response.Code, http.StatusBadRequest)
+			}
+		})
 	}
 }
 
