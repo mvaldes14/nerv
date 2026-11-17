@@ -6,9 +6,9 @@
   Durable incident investigation for Kubernetes.
 </p>
 
-NERV runs inside a cluster, accepts questions and alerts, gathers Kubernetes evidence, and records each investigation in PostgreSQL. DBOS checkpoints the workflow so it can resume after a restart instead of repeating completed work.
+NERV runs inside a cluster, accepts questions and alerts, autonomously detects sustained Kubernetes failures, gathers evidence, and records each investigation in PostgreSQL. DBOS checkpoints the workflow so it can resume after a restart instead of repeating completed work.
 
-Phase 1 is read-only. NERV can inspect workloads and notify an operator, but it cannot change cluster resources.
+NERV is read-only. It can inspect workloads and notify an operator, but it cannot change cluster resources.
 
 ## How it works
 
@@ -16,6 +16,7 @@ NERV starts the same investigation workflow from two inputs:
 
 - `POST /ask` for operator questions
 - `POST /alert` for Alertmanager-compatible webhooks
+- client-go informers for sustained Pod and workload failures
 
 The workflow collects resource state, events, logs, previous logs, and owner references. Decision Gateway chooses whether to suppress, investigate, research, or escalate. Agentgateway handles the LLM request. NERV persists the result and sends a Gotify notification.
 
@@ -141,7 +142,7 @@ docs/                 architecture, API, and testing notes
 
 ## Guardrails
 
-- Kubernetes access is read-only in Phase 1.
+- Kubernetes access is read-only.
 - Tools use `client-go`; NERV does not execute shell commands.
 - Logs and serialized evidence have size limits.
 - Logs, events, status messages, and annotations are treated as untrusted input.
