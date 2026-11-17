@@ -39,7 +39,7 @@ func TestAgentListWorkloadsDiscoversAcrossNamespaces(t *testing.T) {
 		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "vault-0", Namespace: "security"}, Status: corev1.PodStatus{Phase: corev1.PodRunning}},
 		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "apps"}},
 	))
-	result := client.Execute(context.Background(), investigation.ToolCall{ID: "call-1", Function: investigation.ToolCallFunction{Name: "list_workloads", Arguments: `{"namespace":"","kind":"all","label_selector":"","name_contains":"vault","limit":20,"max_bytes":4096}`}})
+	result := client.Execute(context.Background(), investigation.ToolCall{ID: "call-1", Function: investigation.ToolCallFunction{Name: "list_workloads", Arguments: `{"namespace":"","kind":"all","label_selector":"","name_contains":"vault","include_items":true,"limit":20,"max_bytes":4096}`}})
 	if result.Error != "" {
 		t.Fatal(result.Error)
 	}
@@ -64,7 +64,7 @@ func TestAgentListWorkloadsPreservesCountWithinOutputLimit(t *testing.T) {
 		})
 	}
 	client := NewWithClient(fake.NewClientset(objects...))
-	result := client.Execute(context.Background(), investigation.ToolCall{ID: "call-count", Function: investigation.ToolCallFunction{Name: "list_workloads", Arguments: `{"namespace":"","kind":"pod","label_selector":"","name_contains":"","limit":50,"max_bytes":4096}`}})
+	result := client.Execute(context.Background(), investigation.ToolCall{ID: "call-count", Function: investigation.ToolCallFunction{Name: "list_workloads", Arguments: `{"namespace":"","kind":"pod","label_selector":"","name_contains":"","include_items":true,"limit":50,"max_bytes":4096}`}})
 	if result.Error != "" {
 		t.Fatal(result.Error)
 	}
@@ -81,8 +81,22 @@ func TestAgentListWorkloadsPreservesCountWithinOutputLimit(t *testing.T) {
 	if !output.OK || output.Result.MatchedCount != 50 || !output.Result.CountComplete {
 		t.Fatalf("count metadata lost: %#v", output.Result)
 	}
-	if output.Result.ReturnedCount != len(output.Result.Items) || !output.Result.Truncated {
+	if output.Result.ReturnedCount != len(output.Result.Items) || !output.Result.Truncated || !output.Result.ItemsIncluded {
 		t.Fatalf("truncation metadata invalid: %#v", output.Result)
+	}
+
+	countOnly := client.Execute(context.Background(), investigation.ToolCall{ID: "call-count-only", Function: investigation.ToolCallFunction{Name: "list_workloads", Arguments: `{"namespace":"","kind":"pod","label_selector":"","name_contains":"","include_items":false,"limit":50,"max_bytes":4096}`}})
+	if countOnly.Error != "" {
+		t.Fatal(countOnly.Error)
+	}
+	if err := json.Unmarshal([]byte(countOnly.Content), &output); err != nil {
+		t.Fatal(err)
+	}
+	if output.Result.MatchedCount != 50 || output.Result.ReturnedCount != 0 || output.Result.ItemsIncluded || len(output.Result.Items) != 0 {
+		t.Fatalf("count-only output invalid: %#v", output.Result)
+	}
+	if len(countOnly.Content) >= len(result.Content) {
+		t.Fatalf("count-only output was not smaller: count=%d list=%d", len(countOnly.Content), len(result.Content))
 	}
 }
 

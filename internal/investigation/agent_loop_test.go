@@ -71,7 +71,7 @@ func TestAgentLoopDiscoversWorkloadAndReturnsStructuredFinding(t *testing.T) {
 						Type: "function",
 						Function: ToolCallFunction{
 							Name:      "list_workloads",
-							Arguments: `{"namespace":"","kind":"all","label_selector":"","name_contains":"vault","limit":20,"max_bytes":4096}`,
+							Arguments: `{"namespace":"","kind":"all","label_selector":"","name_contains":"vault","include_items":true,"limit":20,"max_bytes":4096}`,
 						},
 					}},
 				},

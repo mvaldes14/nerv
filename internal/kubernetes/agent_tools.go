@@ -33,9 +33,9 @@ func (c *Client) Definitions() []investigation.ToolDefinition {
 	stringField := func(max int) map[string]any { return map[string]any{"type": "string", "maxLength": max} }
 	maxBytesField := map[string]any{"type": "integer", "minimum": 256, "maximum": maxBytes}
 	return []investigation.ToolDefinition{
-		{Type: "function", Function: investigation.ToolFunction{Name: "list_workloads", Description: "List bounded Pod, Deployment, StatefulSet, and DaemonSet summaries. Empty namespace searches all namespaces. Use name_contains for cluster-wide product discovery. For count questions, use matched_count only when count_complete is true.", Strict: true, Parameters: objectSchema(map[string]any{
-			"namespace": stringField(253), "kind": map[string]any{"type": "string", "enum": []string{"all", "pod", "deployment", "statefulset", "daemonset"}}, "label_selector": stringField(1024), "name_contains": stringField(253), "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": maxDiscoveryItems}, "max_bytes": maxBytesField,
-		}, "namespace", "kind", "label_selector", "name_contains", "limit", "max_bytes")}},
+		{Type: "function", Function: investigation.ToolFunction{Name: "list_workloads", Description: "List bounded Pod, Deployment, StatefulSet, and DaemonSet summaries. Empty namespace searches all namespaces. Use name_contains for cluster-wide product discovery. For count questions, set include_items=false and use matched_count only when count_complete is true. This tool does not provide CPU or memory usage.", Strict: true, Parameters: objectSchema(map[string]any{
+			"namespace": stringField(253), "kind": map[string]any{"type": "string", "enum": []string{"all", "pod", "deployment", "statefulset", "daemonset"}}, "label_selector": stringField(1024), "name_contains": stringField(253), "include_items": map[string]any{"type": "boolean"}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": maxDiscoveryItems}, "max_bytes": maxBytesField,
+		}, "namespace", "kind", "label_selector", "name_contains", "include_items", "limit", "max_bytes")}},
 		{Type: "function", Function: investigation.ToolFunction{Name: "describe_resource", Description: "Read a bounded status summary for an approved Kubernetes resource kind.", Strict: true, Parameters: objectSchema(map[string]any{
 			"kind": map[string]any{"type": "string", "enum": []string{"Pod", "Deployment", "StatefulSet", "DaemonSet", "Node"}}, "namespace": stringField(253), "name": stringField(253), "max_bytes": maxBytesField,
 		}, "kind", "namespace", "name", "max_bytes")}},
@@ -60,6 +60,7 @@ type listArgs struct {
 	Kind          string `json:"kind"`
 	LabelSelector string `json:"label_selector"`
 	NameContains  string `json:"name_contains"`
+	IncludeItems  bool   `json:"include_items"`
 	Limit         int    `json:"limit"`
 	MaxBytes      int    `json:"max_bytes"`
 }
@@ -369,17 +370,21 @@ type workloadListResult struct {
 	Truncated      bool  `json:"truncated"`
 	CountComplete  bool  `json:"count_complete"`
 	PerKindScanned int   `json:"per_kind_scan_limit"`
+	ItemsIncluded  bool  `json:"items_included"`
 	Items          []any `json:"items"`
 }
 
 func (c *Client) listWorkloads(ctx context.Context, args listArgs) (workloadListResult, error) {
 	const queryLimit int64 = 1000
-	result := workloadListResult{Items: make([]any, 0, args.Limit), CountComplete: true, PerKindScanned: int(queryLimit)}
+	result := workloadListResult{Items: make([]any, 0, args.Limit), CountComplete: true, PerKindScanned: int(queryLimit), ItemsIncluded: args.IncludeItems}
 	appendValue := func(kind, name string, value any) {
 		if args.NameContains != "" && !strings.Contains(strings.ToLower(name), args.NameContains) {
 			return
 		}
 		result.MatchedCount++
+		if !args.IncludeItems {
+			return
+		}
 		if len(result.Items) >= args.Limit {
 			result.Truncated = true
 			return

@@ -26,7 +26,7 @@ func TestStructuredAnswerValidation(t *testing.T) {
 
 func TestAgentPromptTreatsEvidenceAsUntrustedAndProhibitsUnsupportedClaims(t *testing.T) {
 	prompt := agentSystemPrompt()
-	for _, want := range []string{"untrusted", "shell", "exec", "Helm", "mutation", "approved NERV tool", "executed"} {
+	for _, want := range []string{"untrusted", "shell", "exec", "Helm", "mutation", "approved NERV tool", "executed", "CPU", "capability gap"} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt missing %q", want)
 		}
