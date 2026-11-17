@@ -42,6 +42,16 @@ func (p *Postgres) Close() { p.pool.Close() }
 func (p *Postgres) Ping(ctx context.Context) error { return p.pool.Ping(ctx) }
 
 func (p *Postgres) migrate(ctx context.Context) error {
+	conn, err := p.pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire migration connection: %w", err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock(hashtext('nerv-schema-migration'))`); err != nil {
+		return fmt.Errorf("lock NERV schema migration: %w", err)
+	}
+	defer conn.Exec(context.Background(), `SELECT pg_advisory_unlock(hashtext('nerv-schema-migration'))`)
+
 	const migration = `
 CREATE SCHEMA IF NOT EXISTS nerv;
 
@@ -100,7 +110,7 @@ CREATE INDEX IF NOT EXISTS incidents_status_updated_idx ON nerv.incidents(status
 CREATE INDEX IF NOT EXISTS incident_correlations_incident_idx ON nerv.incident_correlations(incident_id);
 CREATE INDEX IF NOT EXISTS notification_attempts_incident_idx ON nerv.notification_attempts(incident_id, attempted_at DESC);
 `
-	if _, err := p.pool.Exec(ctx, migration); err != nil {
+	if _, err := conn.Exec(ctx, migration); err != nil {
 		return fmt.Errorf("migrate NERV schema: %w", err)
 	}
 	return nil
