@@ -44,7 +44,7 @@ Starts an investigation and waits for the finding. The HTTP request has a 60-sec
 }
 ```
 
-Only `question` is required. Without a target, NERV cannot collect Kubernetes evidence.
+Only `question` is required. Without a target, NERV cannot collect Kubernetes evidence. `/ask` represents explicit operator intent, so it bypasses Decision Gateway and receives a local `investigate` decision with provider `nerv.local` and no external request ID. The CLI `ask` command uses the same decision path.
 
 ```bash
 curl -sS http://127.0.0.1:8080/ask \
@@ -70,7 +70,8 @@ Example response:
   ],
   "decision": {
     "action": "investigate",
-    "reason": "disposition=actionable urgency=soon"
+    "reason": "explicit operator investigation request",
+    "provider": "nerv.local"
   },
   "provider": "agentgateway",
   "model": "openai/gpt-5-mini",
@@ -107,7 +108,7 @@ Example response:
 }
 ```
 
-NERV derives the incident ID from the alert fingerprint. Replaying the same fingerprint returns the existing workflow.
+NERV derives the incident ID from the alert fingerprint. Replaying the same fingerprint returns the existing workflow. Alert requests use the configured Decision Gateway and retain the documented disposition mapping. Autonomous `kubernetes.detector` requests use that same remote path.
 
 ## Incident history
 
@@ -168,12 +169,17 @@ curl -sS http://127.0.0.1:8080/investigations/<incident-id> \
     "id": "8f76c07a5f2bd8f824dd6c13d5d0c451",
     "workflow_id": "incident-8f76c07a5f2bd8f824dd6c13d5d0c451",
     "question": "p95 latency exceeded threshold",
-    "answer": "...",
+    "answer": "Investigation suppressed by policy.\nReason: disposition=duplicate urgency=immediate\nDecision provider: laya\nDecision request ID: req-1\nPolicy decision metadata does not identify or link an existing incident.",
     "evidence": [],
-    "decision": {"action":"investigate","provider":"decision-gateway"},
+    "decision": {
+      "action":"suppress",
+      "reason":"disposition=duplicate urgency=immediate",
+      "provider":"laya",
+      "request_id":"req-1"
+    },
     "confidence": "unknown",
-    "provider": "agentgateway",
-    "model": "openai/gpt-5-mini",
+    "provider": "laya",
+    "model": "",
     "created_at": "2026-10-30T22:52:25Z"
   },
   "evidence": [{"source":"kubernetes.events","summary":"..."}],
@@ -181,7 +187,9 @@ curl -sS http://127.0.0.1:8080/investigations/<incident-id> \
 }
 ```
 
-Evidence/tool output is returned separately from the model-generated finding. `confidence` defaults to `unknown` because NERV does not infer confidence when the model or policy has not supplied one. Decision source is exposed through `finding.decision.provider`; an empty provider means the local NERV policy made the decision.
+Evidence/tool output is returned separately from the finding. `confidence` defaults to `unknown` because NERV does not infer confidence when the model or policy has not supplied one. Decision metadata remains backward-compatible under `finding.decision`: `action`, `reason`, `review_required`, `provider`, and `request_id` are present when available.
+
+For `suppress`, NERV does not call Agentgateway. It persists a human-readable policy outcome with the reason and available provider/request metadata, and the UI labels it **Policy outcome** rather than model-generated output. A remote `duplicate` classification does not prove that another incident exists. Only PostgreSQL/DBOS correlation can reuse an incident, and NERV never fabricates an incident link from decision metadata.
 
 ## Operator UI
 

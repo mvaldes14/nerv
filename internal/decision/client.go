@@ -51,10 +51,14 @@ func (c *Client) Evaluate(ctx context.Context, req investigation.Request, eviden
 	if c.baseURL == "" || c.name == "" || c.version == "" {
 		return investigation.Decision{}, fmt.Errorf("Decision Gateway URL, decision name, and version are required")
 	}
+	source, err := decisionSource(req.Source)
+	if err != nil {
+		return investigation.Decision{}, err
+	}
 	payload := alertDispositionRequest{
 		AlertName:             truncate(firstNonEmpty(req.Labels["alertname"], req.Question), 200),
 		Summary:               evidenceSummary(req.Question, evidence),
-		Source:                decisionSource(req.Source),
+		Source:                source,
 		FiringForMinutes:      0,
 		RepeatedCount:         1,
 		HasRunbook:            req.Annotations["runbook_url"] != "" || req.Annotations["runbook"] != "",
@@ -120,14 +124,15 @@ func mapAction(disposition, urgency string) (string, error) {
 	return "", fmt.Errorf("Decision Gateway returned unsupported disposition %q and urgency %q", disposition, urgency)
 }
 
-func decisionSource(source string) string {
-	if strings.Contains(source, "alert") {
-		return "signoz"
+func decisionSource(source string) (string, error) {
+	switch source {
+	case investigation.SourceHTTPAlert:
+		return "signoz", nil
+	case investigation.SourceKubernetesDetector:
+		return "kubernetes", nil
+	default:
+		return "", fmt.Errorf("source %q is not supported by alert-disposition/v1", source)
 	}
-	if strings.Contains(source, "kubernetes") {
-		return "kubernetes"
-	}
-	return "other"
 }
 
 func evidenceSummary(question string, evidence []investigation.Evidence) string {
