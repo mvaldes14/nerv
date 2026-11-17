@@ -32,6 +32,23 @@ func (a *recordingAcceptor) Accept(_ context.Context, req investigation.Request)
 	return investigation.Accepted{ID: "incident", WorkflowID: "workflow", Status: "accepted"}, nil
 }
 
+func TestDetectorNamespaceAllowlistFiltersEventsBeforeQueueing(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	acceptor := &recordingAcceptor{accepted: make(chan struct{})}
+	detector, err := New(client, acceptor, Config{Namespaces: []string{"nerv"}, QueueCapacity: 4}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	detector.enqueue("pod", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "ignored", Namespace: "default"}})
+	if got := len(detector.queue.items); got != 0 {
+		t.Fatalf("non-allowlisted event queued: %d", got)
+	}
+	detector.enqueue("pod", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "accepted", Namespace: "nerv"}})
+	if got := len(detector.queue.items); got != 1 {
+		t.Fatalf("allowlisted event queue length = %d, want 1", got)
+	}
+}
+
 func TestDetectorStartupReconciliationTriggersOneCrashLoopInvestigation(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "broken", Namespace: "default"},

@@ -2,6 +2,7 @@ package detection
 
 import (
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -9,6 +10,7 @@ import (
 )
 
 func TestEvaluatePodDeterministicFailures(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name string
 		pod  *corev1.Pod
@@ -25,8 +27,10 @@ func TestEvaluatePodDeterministicFailures(t *testing.T) {
 			want: FailureImagePull,
 		},
 		{
-			name: "repeated unexpected restarts",
-			pod:  podWithStatus(corev1.PodRunning, corev1.ContainerStatus{Name: "app", RestartCount: 3, LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{Reason: "Error", ExitCode: 1}}}),
+			name: "repeated recent unexpected restarts",
+			pod: podWithStatus(corev1.PodRunning, corev1.ContainerStatus{Name: "app", RestartCount: 3, LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+				Reason: "Error", ExitCode: 1, FinishedAt: metav1.NewTime(now.Add(-time.Minute)),
+			}}}),
 			want: FailureContainerRestarts,
 		},
 		{
@@ -37,11 +41,21 @@ func TestEvaluatePodDeterministicFailures(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := EvaluatePod(tt.pod, RuleConfig{RestartThreshold: 3})
+			got := EvaluatePod(tt.pod, RuleConfig{RestartThreshold: 3, RestartWindow: 10 * time.Minute, Now: now})
 			if len(got) != 1 || got[0].Identity != tt.want {
 				t.Fatalf("EvaluatePod() = %#v, want one %q failure", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestEvaluatePodIgnoresHistoricalRestarts(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	pod := podWithStatus(corev1.PodRunning, corev1.ContainerStatus{Name: "app", RestartCount: 8, LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+		Reason: "Error", ExitCode: 1, FinishedAt: metav1.NewTime(now.Add(-time.Hour)),
+	}}})
+	if got := EvaluatePod(pod, RuleConfig{RestartThreshold: 3, RestartWindow: 10 * time.Minute, Now: now}); len(got) != 0 {
+		t.Fatalf("historical restart produced failures: %#v", got)
 	}
 }
 

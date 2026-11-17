@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +33,8 @@ type Config struct {
 	Workers               int
 	QueueCapacity         int
 	RestartThreshold      int32
+	RestartWindow         time.Duration
+	Namespaces            []string
 	MaintenanceAnnotation string
 	AcceptTimeout         time.Duration
 }
@@ -48,6 +51,7 @@ type Detector struct {
 	clock        Clock
 	logger       *slog.Logger
 	cfg          Config
+	namespaces   map[string]struct{}
 }
 
 type realClock struct{}
@@ -70,8 +74,17 @@ func New(client kubernetes.Interface, acceptor Acceptor, cfg Config, logger *slo
 	if cfg.AcceptTimeout <= 0 {
 		cfg.AcceptTimeout = 10 * time.Second
 	}
+	if cfg.RestartWindow <= 0 {
+		cfg.RestartWindow = 10 * time.Minute
+	}
 	if logger == nil {
 		logger = slog.Default()
+	}
+	namespaces := make(map[string]struct{}, len(cfg.Namespaces))
+	for _, namespace := range cfg.Namespaces {
+		if namespace = strings.TrimSpace(namespace); namespace != "" {
+			namespaces[namespace] = struct{}{}
+		}
 	}
 	factory := informers.NewSharedInformerFactory(client, cfg.Resync)
 	d := &Detector{
@@ -86,6 +99,7 @@ func New(client kubernetes.Interface, acceptor Acceptor, cfg Config, logger *slo
 		clock:        realClock{},
 		logger:       logger,
 		cfg:          cfg,
+		namespaces:   namespaces,
 	}
 	if err := d.registerHandlers(); err != nil {
 		return nil, err
@@ -159,6 +173,9 @@ func (d *Detector) enqueue(kind string, obj any) {
 		d.logger.Warn("discarding Kubernetes informer event", "kind", kind, "error", err)
 		return
 	}
+	if !d.namespaceAllowed(key) {
+		return
+	}
 	if !d.queue.Enqueue(kind + ":" + key) {
 		d.logger.Warn("autonomous detection queue full; later informer resync will reconcile state", "kind", kind, "resource", key)
 	}
@@ -189,7 +206,12 @@ func (d *Detector) process(ctx context.Context, key string) {
 	resource := kind + ":" + namespace + "/" + name
 	var failures []Failure
 	var err error
-	rules := RuleConfig{RestartThreshold: d.cfg.RestartThreshold, MaintenanceAnnotation: d.cfg.MaintenanceAnnotation}
+	rules := RuleConfig{
+		RestartThreshold:      d.cfg.RestartThreshold,
+		RestartWindow:         d.cfg.RestartWindow,
+		Now:                   d.clock.Now(),
+		MaintenanceAnnotation: d.cfg.MaintenanceAnnotation,
+	}
 	switch kind {
 	case "pod":
 		var value *corev1.Pod
@@ -254,6 +276,18 @@ func (d *Detector) trigger(ctx context.Context, failure Failure) {
 	}
 	d.tracker.Complete(failure, true, now)
 	d.logger.Info("autonomous Kubernetes failure accepted", "incident_id", accepted.ID, "workflow_id", accepted.WorkflowID, "kind", failure.Kind, "namespace", failure.Namespace, "name", failure.Name, "failure", failure.Identity)
+}
+
+func (d *Detector) namespaceAllowed(key string) bool {
+	if len(d.namespaces) == 0 {
+		return true
+	}
+	slash := strings.IndexByte(key, '/')
+	if slash <= 0 {
+		return false
+	}
+	_, ok := d.namespaces[key[:slash]]
+	return ok
 }
 
 func splitQueueKey(value string) (kind, namespace, name string, ok bool) {

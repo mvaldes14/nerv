@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -32,6 +33,8 @@ type Failure struct {
 
 type RuleConfig struct {
 	RestartThreshold      int32
+	RestartWindow         time.Duration
+	Now                   time.Time
 	MaintenanceAnnotation string
 }
 
@@ -55,7 +58,7 @@ func EvaluatePod(pod *corev1.Pod, cfg RuleConfig) []Failure {
 				fmt.Sprintf("container %s cannot pull its image: %s", status.Name, reason)))
 			continue
 		}
-		if cfg.RestartThreshold > 0 && status.RestartCount >= cfg.RestartThreshold && unexpectedTermination(status.LastTerminationState.Terminated) {
+		if cfg.RestartThreshold > 0 && status.RestartCount >= cfg.RestartThreshold && recentUnexpectedTermination(status.LastTerminationState.Terminated, cfg.Now, cfg.RestartWindow) {
 			failures = append(failures, podFailure(pod, status.Name, FailureContainerRestarts, "RepeatedRestarts",
 				fmt.Sprintf("container %s restarted %d times after %s", status.Name, status.RestartCount, status.LastTerminationState.Terminated.Reason)))
 		}
@@ -128,11 +131,11 @@ func workloadFailure(kind, namespace, name, identity, reason, summary string) Fa
 	return Failure{Identity: identity, Kind: kind, Namespace: namespace, Name: name, Reason: reason, Summary: summary}
 }
 
-func unexpectedTermination(termination *corev1.ContainerStateTerminated) bool {
-	if termination == nil {
+func recentUnexpectedTermination(termination *corev1.ContainerStateTerminated, now time.Time, window time.Duration) bool {
+	if termination == nil || termination.Reason == "Completed" || termination.ExitCode == 0 || now.IsZero() || window <= 0 || termination.FinishedAt.IsZero() {
 		return false
 	}
-	return termination.Reason != "Completed" && termination.ExitCode != 0
+	return !termination.FinishedAt.Time.Before(now.Add(-window))
 }
 
 func maintenanceSuppressed(annotations map[string]string, key string) bool {

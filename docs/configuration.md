@@ -19,22 +19,26 @@ NERV reads configuration from environment variables. The Kubernetes manifests lo
 | `NERV_GOTIFY_URL` | empty | Gotify base URL; empty disables delivery |
 | `NERV_GOTIFY_TOKEN` | empty | Gotify application token |
 | `NERV_HTTP_TIMEOUT` | `30s` | Outbound HTTP timeout |
-| `NERV_DETECTION_ENABLED` | `true` | Run autonomous Kubernetes detection with `serve`; never used by one-shot `ask` |
+| `NERV_DETECTION_ENABLED` | `false` | Run autonomous Kubernetes detection with `serve`; the base manifest enables it explicitly |
 | `NERV_DETECTION_PERSISTENCE` | `2m` | Time a deterministic failure must remain present before workflow acceptance |
 | `NERV_DETECTION_COOLDOWN` | `30m` | Minimum interval before a recovered failure identity can open another investigation |
 | `NERV_DETECTION_RESYNC` | `30s` | Informer resync interval used for persistence checks and reconnect reconciliation |
 | `NERV_DETECTION_WORKERS` | `2` | Bounded detector worker count |
 | `NERV_DETECTION_QUEUE_CAPACITY` | `512` | Maximum queued resource reconciliations; later resync recovers dropped events |
 | `NERV_DETECTION_RESTART_THRESHOLD` | `3` | Unexpected container restart count that qualifies as a failure condition |
+| `NERV_DETECTION_RESTART_WINDOW` | `10m` | Only count an unexpected restart when its latest termination finished within this window |
+| `NERV_DETECTION_NAMESPACES` | empty (all) | Comma-separated namespace allowlist; the base manifest starts with `nerv` only |
 | `NERV_DETECTION_MAINTENANCE_ANNOTATION` | `nerv.io/maintenance` | Resource annotation that suppresses detection when set to `true` or present with an empty value |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | empty | OTLP gRPC host and port; empty disables HTTP, service, and GenAI trace export |
 | `OTEL_EXPORTER_OTLP_INSECURE` | `true` | Use plaintext OTLP gRPC |
 
 ## Autonomous detection behavior
 
-`serve` starts shared informers for Pods, Deployments, StatefulSets, and DaemonSets. Initial informer lists reconcile resources that were unhealthy before NERV started. Periodic resyncs re-evaluate persistence without relying on Kubernetes Events and recover state after watch reconnects.
+`serve` starts shared informers for Pods, Deployments, StatefulSets, and DaemonSets when detection is explicitly enabled. Initial informer lists reconcile resources that were unhealthy before NERV started. Periodic resyncs re-evaluate persistence without relying on Kubernetes Events and recover state after watch reconnects. Set `NERV_DETECTION_NAMESPACES` before enabling detection in a shared cluster; an empty value watches every namespace.
 
 A condition must remain continuously present for `NERV_DETECTION_PERSISTENCE`. Recovery before that threshold clears it. One active condition opens one workflow; repeated updates and relists are suppressed. Completed incident correlations remain in cooldown for `NERV_DETECTION_COOLDOWN` before they can resolve to a new incident. NERV and recognized external alerts use the same stable PostgreSQL correlation key, so overlapping intake returns the existing DBOS workflow even across watcher restarts.
+
+Repeated restart detection ignores historical restart counts unless the latest unexpected termination occurred inside `NERV_DETECTION_RESTART_WINDOW`. This prevents a rollout or old node disruption from opening incidents indefinitely.
 
 Set the configured maintenance annotation on a Pod or workload to suppress autonomous detection for that resource. Detection resumes after annotation removal and persistence threshold elapses. NERV only reads annotations; it never creates or changes them.
 

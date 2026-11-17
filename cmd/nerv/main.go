@@ -197,6 +197,8 @@ func runServe(ctx context.Context, args []string, cfg config.Config, svc *invest
 				Workers:               cfg.DetectionWorkers,
 				QueueCapacity:         cfg.DetectionQueueCapacity,
 				RestartThreshold:      int32(cfg.DetectionRestartThreshold),
+				RestartWindow:         cfg.DetectionRestartWindow,
+				Namespaces:            cfg.DetectionNamespaces,
 				MaintenanceAnnotation: cfg.DetectionMaintenanceAnnotation,
 				AcceptTimeout:         cfg.HTTPTimeout,
 			}, logger)
