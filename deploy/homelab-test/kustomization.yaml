@@ -5,6 +5,7 @@ namespace: nerv
 
 resources:
   - ../local
+  - httproute.yaml
 
 images:
   - name: nerv

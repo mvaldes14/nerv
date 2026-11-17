@@ -5,7 +5,7 @@ NERV reads configuration from environment variables. The Kubernetes manifests lo
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `NERV_ADDR` | `127.0.0.1:8080` | HTTP listen address |
-| `NERV_AUTH_TOKEN` | empty | Bearer token for protected API routes |
+| `NERV_AUTH_TOKEN` | empty | Bearer token for protected API routes and operator UI data calls; set it in private/shared deployments |
 | `DATABASE_URL` | required | PostgreSQL URL used by DBOS and NERV tables |
 | `KUBECONFIG` | standard client-go lookup | Local Kubernetes configuration; in-cluster auth is preferred |
 | `NERV_LLM_PROVIDER` | `agentgateway` | LLM provider name; use `echo` for local tests |
@@ -41,6 +41,10 @@ A condition must remain continuously present for `NERV_DETECTION_PERSISTENCE`. R
 Repeated restart detection ignores historical restart counts unless the latest unexpected termination occurred inside `NERV_DETECTION_RESTART_WINDOW`. This prevents a rollout or old node disruption from opening incidents indefinitely.
 
 Set the configured maintenance annotation on a Pod or workload to suppress autonomous detection for that resource. Detection resumes after annotation removal and persistence threshold elapses. NERV only reads annotations; it never creates or changes them.
+
+## Operator UI authentication
+
+The embedded UI is available at `/ui/`. Its static shell can load without credentials, but incident reads and `/ask` submissions call protected NERV APIs. The operator enters `NERV_AUTH_TOKEN` in the browser; the UI stores it only in per-tab `sessionStorage` with a 30-minute expiry and sends it as a bearer token. NERV does not render the token into HTML or JavaScript. Keep the service private and set `NERV_AUTH_TOKEN` outside isolated local development.
 
 ## Local host configuration
 

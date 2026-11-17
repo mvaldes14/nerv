@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -82,6 +84,7 @@ CREATE TABLE IF NOT EXISTS nerv.findings (
     workflow_id text NOT NULL,
     answer text NOT NULL,
     decision jsonb NOT NULL,
+    confidence text NOT NULL DEFAULT 'unknown',
     uncertainty jsonb NOT NULL DEFAULT '[]'::jsonb,
     provider text NOT NULL DEFAULT '',
     model text NOT NULL DEFAULT '',
@@ -105,6 +108,9 @@ CREATE TABLE IF NOT EXISTS nerv.notification_attempts (
     error text NOT NULL DEFAULT '',
     attempted_at timestamptz NOT NULL DEFAULT now()
 );
+
+ALTER TABLE nerv.findings ADD COLUMN IF NOT EXISTS confidence text NOT NULL DEFAULT 'unknown';
+ALTER TABLE nerv.findings ADD COLUMN IF NOT EXISTS uncertainty jsonb NOT NULL DEFAULT '[]'::jsonb;
 
 CREATE INDEX IF NOT EXISTS incidents_status_updated_idx ON nerv.incidents(status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS incident_correlations_incident_idx ON nerv.incident_correlations(incident_id);
@@ -220,6 +226,9 @@ ON CONFLICT (incident_id, ordinal) DO UPDATE SET source = EXCLUDED.source, summa
 }
 
 func (p *Postgres) SaveFinding(ctx context.Context, finding investigation.Finding) error {
+	if strings.TrimSpace(finding.Confidence) == "" {
+		finding.Confidence = "unknown"
+	}
 	decision, err := json.Marshal(finding.Decision)
 	if err != nil {
 		return fmt.Errorf("encode decision: %w", err)
@@ -229,16 +238,17 @@ func (p *Postgres) SaveFinding(ctx context.Context, finding investigation.Findin
 		return fmt.Errorf("encode uncertainty: %w", err)
 	}
 	_, err = p.pool.Exec(ctx, `
-INSERT INTO nerv.findings (incident_id, workflow_id, answer, decision, uncertainty, provider, model, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+INSERT INTO nerv.findings (incident_id, workflow_id, answer, decision, confidence, uncertainty, provider, model, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 ON CONFLICT (incident_id) DO UPDATE SET
     answer = EXCLUDED.answer,
     decision = EXCLUDED.decision,
+    confidence = EXCLUDED.confidence,
     uncertainty = EXCLUDED.uncertainty,
     provider = EXCLUDED.provider,
     model = EXCLUDED.model,
     created_at = EXCLUDED.created_at`,
-		finding.ID, finding.WorkflowID, finding.Answer, decision, uncertainty, finding.Provider, finding.Model, finding.CreatedAt)
+		finding.ID, finding.WorkflowID, finding.Answer, decision, finding.Confidence, uncertainty, finding.Provider, finding.Model, finding.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("save finding: %w", err)
 	}
@@ -267,48 +277,169 @@ WHERE incident_id = $1`, incidentID)
 	return nil
 }
 
-func (p *Postgres) GetFinding(ctx context.Context, incidentID string) (investigation.Finding, string, error) {
+func (p *Postgres) GetInvestigation(ctx context.Context, incidentID string) (investigation.Investigation, error) {
+	var detail investigation.Investigation
+	var targetJSON, labelsJSON, annotationsJSON, decisionJSON, uncertaintyJSON []byte
 	var finding investigation.Finding
-	var status string
-	var targetJSON, decisionJSON, uncertaintyJSON []byte
+	var hasFinding bool
 	err := p.pool.QueryRow(ctx, `
-SELECT i.id, i.workflow_id, i.question, i.status, i.target,
-       COALESCE(f.answer, ''), COALESCE(f.decision, '{}'::jsonb),
+SELECT i.id, i.workflow_id, i.source, i.question, i.status, i.target, i.labels, i.annotations,
+       i.created_at, i.updated_at, f.incident_id IS NOT NULL,
+       COALESCE(f.answer, ''), COALESCE(f.decision, '{}'::jsonb), COALESCE(f.confidence, 'unknown'),
        COALESCE(f.uncertainty, '[]'::jsonb), COALESCE(f.provider, ''),
        COALESCE(f.model, ''), COALESCE(f.created_at, i.created_at)
 FROM nerv.incidents i
 LEFT JOIN nerv.findings f ON f.incident_id = i.id
 WHERE i.id = $1`, incidentID).Scan(
-		&finding.ID, &finding.WorkflowID, &finding.Question, &status, &targetJSON,
-		&finding.Answer, &decisionJSON, &uncertaintyJSON, &finding.Provider,
+		&detail.Incident.ID, &detail.Incident.WorkflowID, &detail.Incident.Source,
+		&detail.Incident.Question, &detail.Incident.Status, &targetJSON, &labelsJSON,
+		&annotationsJSON, &detail.Incident.CreatedAt, &detail.Incident.UpdatedAt, &hasFinding,
+		&finding.Answer, &decisionJSON, &finding.Confidence, &uncertaintyJSON, &finding.Provider,
 		&finding.Model, &finding.CreatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return investigation.Finding{}, "", fmt.Errorf("incident %q not found", incidentID)
+		return investigation.Investigation{}, fmt.Errorf("incident %q not found", incidentID)
 	}
 	if err != nil {
-		return investigation.Finding{}, "", fmt.Errorf("get finding: %w", err)
+		return investigation.Investigation{}, fmt.Errorf("get investigation: %w", err)
 	}
-	if err := json.Unmarshal(decisionJSON, &finding.Decision); err != nil {
-		return investigation.Finding{}, "", fmt.Errorf("decode decision: %w", err)
-	}
-	if err := json.Unmarshal(uncertaintyJSON, &finding.Uncertainty); err != nil {
-		return investigation.Finding{}, "", fmt.Errorf("decode uncertainty: %w", err)
+	if err := decodeIncidentContext(&detail.Incident, targetJSON, labelsJSON, annotationsJSON); err != nil {
+		return investigation.Investigation{}, err
 	}
 
 	rows, err := p.pool.Query(ctx, `SELECT source, summary FROM nerv.evidence WHERE incident_id = $1 ORDER BY ordinal`, incidentID)
 	if err != nil {
-		return investigation.Finding{}, "", fmt.Errorf("query evidence: %w", err)
+		return investigation.Investigation{}, fmt.Errorf("query evidence: %w", err)
 	}
-	defer rows.Close()
 	for rows.Next() {
 		var item investigation.Evidence
 		if err := rows.Scan(&item.Source, &item.Summary); err != nil {
-			return investigation.Finding{}, "", fmt.Errorf("scan evidence: %w", err)
+			rows.Close()
+			return investigation.Investigation{}, fmt.Errorf("scan evidence: %w", err)
 		}
-		finding.Evidence = append(finding.Evidence, item)
+		detail.Evidence = append(detail.Evidence, item)
 	}
-	return finding, status, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return investigation.Investigation{}, fmt.Errorf("read evidence: %w", err)
+	}
+	rows.Close()
+
+	if hasFinding {
+		finding.ID = detail.Incident.ID
+		finding.WorkflowID = detail.Incident.WorkflowID
+		finding.Question = detail.Incident.Question
+		finding.Evidence = detail.Evidence
+		if err := json.Unmarshal(decisionJSON, &finding.Decision); err != nil {
+			return investigation.Investigation{}, fmt.Errorf("decode decision: %w", err)
+		}
+		if err := json.Unmarshal(uncertaintyJSON, &finding.Uncertainty); err != nil {
+			return investigation.Investigation{}, fmt.Errorf("decode uncertainty: %w", err)
+		}
+		detail.Finding = &finding
+	}
+
+	notifications, err := p.pool.Query(ctx, `
+SELECT sink, external_id, status, error, attempted_at
+FROM nerv.notification_attempts
+WHERE incident_id = $1
+ORDER BY attempted_at DESC`, incidentID)
+	if err != nil {
+		return investigation.Investigation{}, fmt.Errorf("query notifications: %w", err)
+	}
+	defer notifications.Close()
+	for notifications.Next() {
+		var attempt investigation.NotificationAttempt
+		if err := notifications.Scan(&attempt.Sink, &attempt.ExternalID, &attempt.Status, &attempt.Error, &attempt.AttemptedAt); err != nil {
+			return investigation.Investigation{}, fmt.Errorf("scan notification: %w", err)
+		}
+		detail.Notifications = append(detail.Notifications, attempt)
+	}
+	if err := notifications.Err(); err != nil {
+		return investigation.Investigation{}, fmt.Errorf("read notifications: %w", err)
+	}
+	return detail, nil
+}
+
+func (p *Postgres) ListIncidents(ctx context.Context, filter investigation.IncidentFilter) (investigation.IncidentPage, error) {
+	query, args := incidentListQuery(filter)
+	rows, err := p.pool.Query(ctx, query, args...)
+	if err != nil {
+		return investigation.IncidentPage{}, fmt.Errorf("list incidents: %w", err)
+	}
+	defer rows.Close()
+
+	page := investigation.IncidentPage{Limit: filter.Limit, Offset: filter.Offset}
+	for rows.Next() {
+		var item investigation.IncidentSummary
+		var targetJSON, labelsJSON, annotationsJSON []byte
+		if err := rows.Scan(
+			&item.ID, &item.WorkflowID, &item.Source, &item.Question, &item.Status,
+			&targetJSON, &labelsJSON, &annotationsJSON, &item.CreatedAt, &item.UpdatedAt,
+		); err != nil {
+			return investigation.IncidentPage{}, fmt.Errorf("scan incident: %w", err)
+		}
+		if len(page.Items) == filter.Limit {
+			page.HasMore = true
+			continue
+		}
+		if err := decodeIncidentContext(&item, targetJSON, labelsJSON, annotationsJSON); err != nil {
+			return investigation.IncidentPage{}, err
+		}
+		page.Items = append(page.Items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return investigation.IncidentPage{}, fmt.Errorf("read incidents: %w", err)
+	}
+	return page, nil
+}
+
+func incidentListQuery(filter investigation.IncidentFilter) (string, []any) {
+	var query strings.Builder
+	query.WriteString(`
+SELECT i.id, i.workflow_id, i.source, i.question, i.status, i.target, i.labels, i.annotations,
+       i.created_at, i.updated_at
+FROM nerv.incidents i
+WHERE true`)
+	args := make([]any, 0, 6)
+	add := func(clause string, value any) {
+		args = append(args, value)
+		query.WriteString(clause)
+		query.WriteByte('$')
+		query.WriteString(strconv.Itoa(len(args)))
+	}
+	if filter.Source != "" {
+		add(" AND i.source = ", filter.Source)
+	}
+	if filter.Status != "" {
+		add(" AND i.status = ", filter.Status)
+	}
+	if filter.Namespace != "" {
+		add(" AND i.target->>'namespace' = ", filter.Namespace)
+	}
+	if filter.Workload != "" {
+		add(" AND i.target->>'name' = ", filter.Workload)
+	}
+	args = append(args, filter.Limit+1)
+	query.WriteString(" ORDER BY i.created_at DESC, i.id DESC LIMIT $")
+	query.WriteString(strconv.Itoa(len(args)))
+	args = append(args, filter.Offset)
+	query.WriteString(" OFFSET $")
+	query.WriteString(strconv.Itoa(len(args)))
+	return query.String(), args
+}
+
+func decodeIncidentContext(item *investigation.IncidentSummary, targetJSON, labelsJSON, annotationsJSON []byte) error {
+	if err := json.Unmarshal(targetJSON, &item.Target); err != nil {
+		return fmt.Errorf("decode target: %w", err)
+	}
+	if err := json.Unmarshal(labelsJSON, &item.Labels); err != nil {
+		return fmt.Errorf("decode labels: %w", err)
+	}
+	if err := json.Unmarshal(annotationsJSON, &item.Annotations); err != nil {
+		return fmt.Errorf("decode annotations: %w", err)
+	}
+	return nil
 }
 
 func (p *Postgres) SentNotification(ctx context.Context, incidentID, sink string) (string, bool, error) {
