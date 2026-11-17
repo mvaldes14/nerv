@@ -171,26 +171,30 @@
     grid.className = 'decision-grid';
     grid.append(
       fact('Recommended action', finding?.decision?.action || 'Pending'),
-      fact('Decision source', finding?.decision?.provider || 'Local NERV policy'),
+      fact('Decision provider', finding?.decision?.provider || 'Local NERV policy'),
+      fact('Decision reason', finding?.decision?.reason || 'Not recorded'),
+      fact('Decision request ID', finding?.decision?.request_id || 'Not provided'),
       fact('Confidence', finding?.confidence || 'Unknown / not asserted'),
       fact('Review required', finding?.decision?.review_required ? 'Yes' : 'No')
     );
     decision.append(grid);
-    if (finding?.decision?.reason) decision.append(text('p', finding.decision.reason, 'output'));
     detail.append(decision);
 
-    const model = section('Model-generated finding');
-    model.append(text('div', finding?.answer || 'Finding not available while investigation is running.', 'output'));
-    const modelMeta = document.createElement('div');
-    modelMeta.className = 'detail-meta';
-    modelMeta.append(text('span', `Provider: ${finding?.provider || 'not recorded'}`), text('span', `Model: ${finding?.model || 'not recorded'}`));
-    model.append(modelMeta);
-    const uncertainty = finding?.uncertainty?.length ? finding.uncertainty.join(' • ') : 'No structured uncertainty recorded; confidence remains unknown.';
-    model.append(fact('Uncertainty', uncertainty));
-    detail.append(model);
+    const suppressed = finding?.decision?.action === 'suppress';
+    const outcome = section(suppressed ? 'Policy outcome' : 'Model-generated finding');
+    outcome.append(text('div', finding?.answer || 'Finding not available while investigation is running.', 'output'));
+    if (!suppressed) {
+      const modelMeta = document.createElement('div');
+      modelMeta.className = 'detail-meta';
+      modelMeta.append(text('span', `Provider: ${finding?.provider || 'not recorded'}`), text('span', `Model: ${finding?.model || 'not recorded'}`));
+      outcome.append(modelMeta);
+      const uncertainty = finding?.uncertainty?.length ? finding.uncertainty.join(' • ') : 'No structured uncertainty recorded; confidence remains unknown.';
+      outcome.append(fact('Uncertainty', uncertainty));
+    }
+    detail.append(outcome);
 
     const evidence = section('Evidence and tool output');
-    evidence.append(text('p', 'Persisted source material. Kept separate from model-generated findings.', 'status-line'));
+    evidence.append(text('p', 'Persisted source material. Kept separate from policy and model outcomes.', 'status-line'));
     const evidenceList = document.createElement('div');
     evidenceList.className = 'evidence';
     for (const item of data.evidence || []) {

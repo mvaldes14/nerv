@@ -25,8 +25,8 @@ NERV is a Go service that runs inside Kubernetes. It uses DBOS for durable execu
 3. Persist the incident in the `nerv` PostgreSQL schema.
 4. Collect Kubernetes evidence when the request includes a target.
 5. Persist evidence before calling AI services.
-6. Execute the configured Decision Gateway contract.
-7. Skip the LLM when the decision is `suppress`.
+6. Route the decision by explicit intake source. Operator questions (`http.ask` and `cli`) receive a local `investigate` decision; alerts and autonomous Kubernetes failures use the configured Decision Gateway.
+7. Skip the LLM when the decision is `suppress` and build a policy outcome containing the decision reason, provider, and request ID when available.
 8. Otherwise, send the question and evidence to Agentgateway.
 9. Persist the finding.
 10. Send the finding to Gotify.
@@ -46,7 +46,7 @@ Telemetry conformance will be checked against a pinned GenAI semantic-convention
 
 ## Incident identity
 
-Operator questions receive a new UUID unless the caller supplies `idempotency_key`. Idempotency keys are source-independent. Autonomous failures use a canonical key containing namespace, kind, name, container, and deterministic failure class. Recognized external alerts build the same key; other alerts retain their Alertmanager fingerprint. PostgreSQL resolves that key to one active incident ID transactionally, and DBOS uses the incident ID as workflow identity. This suppresses overlapping watcher, reconnect, and external intake across process restarts.
+Operator questions receive a new UUID unless the caller supplies `idempotency_key`. Idempotency keys are source-independent. Autonomous failures use a canonical key containing namespace, kind, name, container, and deterministic failure class. Recognized external alerts build the same key; other alerts retain their Alertmanager fingerprint. PostgreSQL resolves that key to one active incident ID transactionally, and DBOS uses the incident ID as workflow identity. This suppresses overlapping watcher, reconnect, and external intake across process restarts. PostgreSQL/DBOS correlation is the only authority for reusing an incident; a Decision Gateway `duplicate` disposition only selects `suppress` and does not prove an existing incident or create an incident link.
 
 Detector state also suppresses repeated informer updates while a condition remains active. Recovery clears in-memory active state. Completed correlations remain mapped to their incident through the configured cooldown, then may resolve to a new incident ID. Correlations whose workflows are still running remain active, preventing downstream PostgreSQL or AI failures from causing unbounded new work.
 
@@ -72,9 +72,20 @@ Resource summaries exclude environment variables, annotations, managed fields, a
 
 The collector limits each serialized evidence item to 32 KiB and pod logs to the latest 200 lines.
 
-## Decision mapping
+## Source-aware decision routing
 
-NERV calls the deployed `alert-disposition/v1` contract. It maps the returned disposition and urgency to a workflow action:
+NERV routes decisions by exact source values:
+
+| Request source | Decision path |
+| --- | --- |
+| `http.ask` | Local `investigate` decision with provider `nerv.local` |
+| `cli` | Local `investigate` decision with provider `nerv.local` |
+| `http.alert` | Configured Decision Gateway `alert-disposition/v1` contract |
+| `kubernetes.detector` | Configured Decision Gateway `alert-disposition/v1` contract |
+
+Unknown sources fail before any remote decision call. When Decision Gateway is not configured, alert and detector sources retain the existing local `investigate` fallback.
+
+For remote sources, NERV maps disposition and urgency to a workflow action:
 
 | Disposition | Urgency | NERV action |
 | --- | --- | --- |
@@ -84,7 +95,7 @@ NERV calls the deployed `alert-disposition/v1` contract. It maps the returned di
 | `actionable` | `backlog` | `research` |
 | `actionable` | `none` | `suppress` |
 
-When Decision Gateway is not configured, NERV uses `investigate`.
+A genuine `suppress` result persists a policy outcome rather than model output. The answer includes the policy reason and available provider/request metadata, while `finding.decision` remains the structured source of those fields. Suppression never fabricates an existing incident ID or link.
 
 ## Persistence
 

@@ -19,7 +19,7 @@ NERV starts the same investigation workflow from two inputs:
 - client-go informers for sustained Pod and workload failures
 - the embedded private operator UI at `/ui/`
 
-The workflow collects resource state, events, logs, previous logs, and owner references. Decision Gateway chooses whether to suppress, investigate, research, or escalate. Agentgateway handles the LLM request. NERV persists the result and sends a Gotify notification.
+The workflow collects resource state, events, logs, previous logs, and owner references. Operator questions receive a local `investigate` decision; alerts and autonomous detections use Decision Gateway to choose whether to suppress, investigate, research, or escalate. Agentgateway handles non-suppressed LLM requests. NERV persists the result and sends a Gotify notification.
 
 ```text
 question or alert

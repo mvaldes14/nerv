@@ -11,6 +11,13 @@ import (
 	"github.com/mvaldes14/nerv/internal/telemetry"
 )
 
+const (
+	SourceHTTPAsk            = "http.ask"
+	SourceCLI                = "cli"
+	SourceHTTPAlert          = "http.alert"
+	SourceKubernetesDetector = "kubernetes.detector"
+)
+
 type Request struct {
 	ID             string            `json:"id,omitempty"`
 	IdempotencyKey string            `json:"idempotency_key,omitempty"`
@@ -332,8 +339,10 @@ func (s *Service) Investigate(ctx dbos.Context, req Request) (finding Finding, w
 		return Finding{}, err
 	}
 
-	generation := Generation{Answer: "Investigation suppressed by policy.", Provider: decision.Provider}
-	if decision.Action != "suppress" {
+	var generation Generation
+	if decision.Action == "suppress" {
+		generation = Generation{Answer: suppressionAnswer(decision), Provider: decision.Provider}
+	} else {
 		generation, err = dbos.RunAsStep(ctx, func(stepCtx context.Context) (Generation, error) {
 			answer, provider, model, generateErr := s.llm.Generate(telemetry.WithSpan(stepCtx, agentCtx), buildPrompt(req, decision), evidence)
 			return Generation{Answer: answer, Provider: provider, Model: model}, generateErr
@@ -387,6 +396,35 @@ func (s *Service) Investigate(ctx dbos.Context, req Request) (finding Finding, w
 		return Finding{}, err
 	}
 	return finding, nil
+}
+
+func suppressionAnswer(decision Decision) string {
+	lines := []string{"Investigation suppressed by policy."}
+	reason := policyMetadataValue(decision.Reason, 500)
+	provider := policyMetadataValue(decision.Provider, 200)
+	requestID := policyMetadataValue(decision.RequestID, 200)
+	if reason != "" {
+		lines = append(lines, "Reason: "+reason)
+	}
+	if provider != "" {
+		lines = append(lines, "Decision provider: "+provider)
+	}
+	if requestID != "" {
+		lines = append(lines, "Decision request ID: "+requestID)
+	}
+	if len(lines) > 1 {
+		lines = append(lines, "Policy decision metadata does not identify or link an existing incident.")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func policyMetadataValue(value string, limit int) string {
+	value = strings.Join(strings.Fields(value), " ")
+	runes := []rune(value)
+	if len(runes) > limit {
+		value = string(runes[:limit])
+	}
+	return value
 }
 
 type defaultDecisionEngine struct{}

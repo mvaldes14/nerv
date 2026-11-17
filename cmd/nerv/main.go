@@ -104,10 +104,11 @@ func buildService(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		collector = kubeClient
 	}
 
-	var decisionEngine investigation.DecisionEngine
+	var remoteDecisionEngine investigation.DecisionEngine
 	if cfg.DecisionGatewayURL != "" {
-		decisionEngine = decision.NewClient(cfg.DecisionGatewayURL, cfg.DecisionGatewayToken, cfg.DecisionName, cfg.DecisionVersion, cfg.HTTPTimeout)
+		remoteDecisionEngine = decision.NewClient(cfg.DecisionGatewayURL, cfg.DecisionGatewayToken, cfg.DecisionName, cfg.DecisionVersion, cfg.HTTPTimeout)
 	}
+	decisionEngine := decision.NewRouter(remoteDecisionEngine)
 
 	var notifier investigation.Notifier
 	if cfg.GotifyURL != "" || cfg.GotifyToken != "" {
@@ -157,7 +158,7 @@ func runAsk(args []string, svc *investigation.Service) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	req := investigation.Request{Question: question, Source: "cli"}
+	req := investigation.Request{Question: question, Source: investigation.SourceCLI}
 	if *name != "" {
 		req.Target = &investigation.Target{Namespace: *namespace, Kind: *kind, Name: *name, Container: *container}
 	}

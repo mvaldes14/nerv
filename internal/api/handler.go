@@ -83,7 +83,7 @@ func (h *Handler) ask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	req.Source = "http.ask"
+	req.Source = investigation.SourceHTTPAsk
 	if strings.TrimSpace(req.Question) == "" {
 		writeError(w, http.StatusBadRequest, "question is required")
 		return
@@ -222,7 +222,7 @@ func alertRequest(receiver string, alert alertmanagerAlert) investigation.Reques
 	req := investigation.Request{
 		IdempotencyKey: alert.Fingerprint,
 		Question:       question,
-		Source:         "http.alert",
+		Source:         investigation.SourceHTTPAlert,
 		Labels:         alert.Labels,
 		Annotations:    alert.Annotations,
 	}

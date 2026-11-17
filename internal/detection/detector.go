@@ -256,7 +256,7 @@ func (d *Detector) trigger(ctx context.Context, failure Failure) {
 			Container: failure.Container,
 		}, failure.Identity),
 		Question: fmt.Sprintf("Investigate autonomous Kubernetes failure: %s. %s", failure.Reason, failure.Summary),
-		Source:   "kubernetes.detector",
+		Source:   investigation.SourceKubernetesDetector,
 		Target: &investigation.Target{
 			Namespace: failure.Namespace,
 			Kind:      failure.Kind,
