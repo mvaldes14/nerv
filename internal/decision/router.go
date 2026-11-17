@@ -37,6 +37,13 @@ func (r *Router) Evaluate(ctx context.Context, req investigation.Request, eviden
 		}
 		return r.remote.Evaluate(ctx, req, evidence)
 	default:
-		return investigation.Decision{}, fmt.Errorf("unsupported investigation source %q", req.Source)
+		return investigation.Decision{}, fmt.Errorf(
+			"unsupported investigation source %q; supported sources are %q, %q, %q, and %q",
+			req.Source,
+			investigation.SourceHTTPAsk,
+			investigation.SourceCLI,
+			investigation.SourceHTTPAlert,
+			investigation.SourceKubernetesDetector,
+		)
 	}
 }

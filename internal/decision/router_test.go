@@ -76,7 +76,7 @@ func TestRouterUsesLocalFallbackWhenGatewayIsNotConfigured(t *testing.T) {
 func TestRouterRejectsUnknownSource(t *testing.T) {
 	remote := &recordingDecisionEngine{}
 	_, err := NewRouter(remote).Evaluate(context.Background(), investigation.Request{Source: "other"}, nil)
-	if err == nil || !strings.Contains(err.Error(), "unsupported investigation source") {
+	if err == nil || !strings.Contains(err.Error(), "unsupported investigation source") || !strings.Contains(err.Error(), investigation.SourceHTTPAsk) || !strings.Contains(err.Error(), investigation.SourceKubernetesDetector) {
 		t.Fatalf("error = %v", err)
 	}
 	if remote.calls != 0 {

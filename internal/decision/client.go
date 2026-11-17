@@ -125,6 +125,9 @@ func mapAction(disposition, urgency string) (string, error) {
 }
 
 func decisionSource(source string) (string, error) {
+	if strings.TrimSpace(source) == "" {
+		return "", fmt.Errorf("source is empty and not supported by alert-disposition/v1")
+	}
 	switch source {
 	case investigation.SourceHTTPAlert:
 		return "signoz", nil

@@ -400,17 +400,31 @@ func (s *Service) Investigate(ctx dbos.Context, req Request) (finding Finding, w
 
 func suppressionAnswer(decision Decision) string {
 	lines := []string{"Investigation suppressed by policy."}
-	if strings.TrimSpace(decision.Reason) != "" {
-		lines = append(lines, "Reason: "+decision.Reason)
+	reason := policyMetadataValue(decision.Reason, 500)
+	provider := policyMetadataValue(decision.Provider, 200)
+	requestID := policyMetadataValue(decision.RequestID, 200)
+	if reason != "" {
+		lines = append(lines, "Reason: "+reason)
 	}
-	if strings.TrimSpace(decision.Provider) != "" {
-		lines = append(lines, "Decision provider: "+decision.Provider)
+	if provider != "" {
+		lines = append(lines, "Decision provider: "+provider)
 	}
-	if strings.TrimSpace(decision.RequestID) != "" {
-		lines = append(lines, "Decision request ID: "+decision.RequestID)
+	if requestID != "" {
+		lines = append(lines, "Decision request ID: "+requestID)
 	}
-	lines = append(lines, "Policy decision metadata does not identify or link an existing incident.")
+	if len(lines) > 1 {
+		lines = append(lines, "Policy decision metadata does not identify or link an existing incident.")
+	}
 	return strings.Join(lines, "\n")
+}
+
+func policyMetadataValue(value string, limit int) string {
+	value = strings.Join(strings.Fields(value), " ")
+	runes := []rune(value)
+	if len(runes) > limit {
+		value = string(runes[:limit])
+	}
+	return value
 }
 
 type defaultDecisionEngine struct{}

@@ -65,8 +65,12 @@ func TestEvaluateMapsKubernetesDetectorSource(t *testing.T) {
 
 func TestEvaluateRejectsSourceOutsideAlertDispositionContract(t *testing.T) {
 	client := NewClient("http://decision.invalid", "", "incident-routing", "v1", time.Second)
-	_, err := client.Evaluate(context.Background(), investigation.Request{Question: "why", Source: investigation.SourceHTTPAsk}, nil)
-	if err == nil || !strings.Contains(err.Error(), "not supported by alert-disposition/v1") {
-		t.Fatalf("error = %v", err)
+	for _, source := range []string{investigation.SourceHTTPAsk, "", "  "} {
+		t.Run(source, func(t *testing.T) {
+			_, err := client.Evaluate(context.Background(), investigation.Request{Question: "why", Source: source}, nil)
+			if err == nil || !strings.Contains(err.Error(), "not supported by alert-disposition/v1") {
+				t.Fatalf("error = %v", err)
+			}
+		})
 	}
 }
