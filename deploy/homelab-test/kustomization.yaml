@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: nerv
+
+resources:
+  - ../local
+
+images:
+  - name: nerv
+    newName: ghcr.io/mvaldes14/nerv
+    newTag: dev
+
+patches:
+  - path: configmap-patch.yaml
+  - path: deployment-patch.yaml
