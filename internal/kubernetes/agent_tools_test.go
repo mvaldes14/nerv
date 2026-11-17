@@ -2,12 +2,15 @@ package kubernetes
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/mvaldes14/nerv/internal/investigation"
@@ -49,6 +52,47 @@ func TestAgentListWorkloadsDiscoversAcrossNamespaces(t *testing.T) {
 		if strings.Contains(result.Content, unwanted) {
 			t.Errorf("result unexpectedly contains %q: %s", unwanted, result.Content)
 		}
+	}
+}
+
+func TestAgentListWorkloadsPreservesCountWithinOutputLimit(t *testing.T) {
+	objects := make([]runtime.Object, 0, 50)
+	for i := 0; i < 50; i++ {
+		objects = append(objects, &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("pod-%02d", i), Namespace: "apps"},
+			Status:     corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+		})
+	}
+	client := NewWithClient(fake.NewClientset(objects...))
+	result := client.Execute(context.Background(), investigation.ToolCall{ID: "call-count", Function: investigation.ToolCallFunction{Name: "list_workloads", Arguments: `{"namespace":"","kind":"pod","label_selector":"","name_contains":"","limit":50,"max_bytes":4096}`}})
+	if result.Error != "" {
+		t.Fatal(result.Error)
+	}
+	if len(result.Content) > 4096 || strings.Contains(result.Content, "tool output exceeded") {
+		t.Fatalf("invalid bounded output (%d bytes): %s", len(result.Content), result.Content)
+	}
+	var output struct {
+		OK     bool               `json:"ok"`
+		Result workloadListResult `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(result.Content), &output); err != nil {
+		t.Fatal(err)
+	}
+	if !output.OK || output.Result.MatchedCount != 50 || !output.Result.CountComplete {
+		t.Fatalf("count metadata lost: %#v", output.Result)
+	}
+	if output.Result.ReturnedCount != len(output.Result.Items) || !output.Result.Truncated {
+		t.Fatalf("truncation metadata invalid: %#v", output.Result)
+	}
+}
+
+func TestBoundJSONBytesReturnsUsablePreview(t *testing.T) {
+	content := boundJSONBytes([]byte(`{"ok":true,"result":"`+strings.Repeat(`\"value\"`, 1000)+`"}`), 256)
+	if len(content) > 256 || strings.Contains(content, "tool output exceeded") || !json.Valid([]byte(content)) {
+		t.Fatalf("invalid bounded content (%d bytes): %s", len(content), content)
+	}
+	if !strings.Contains(content, `"truncated":true`) || !strings.Contains(content, `"preview"`) {
+		t.Fatalf("missing truncation metadata: %s", content)
 	}
 }
 

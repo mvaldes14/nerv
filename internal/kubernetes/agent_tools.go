@@ -33,7 +33,7 @@ func (c *Client) Definitions() []investigation.ToolDefinition {
 	stringField := func(max int) map[string]any { return map[string]any{"type": "string", "maxLength": max} }
 	maxBytesField := map[string]any{"type": "integer", "minimum": 256, "maximum": maxBytes}
 	return []investigation.ToolDefinition{
-		{Type: "function", Function: investigation.ToolFunction{Name: "list_workloads", Description: "List bounded Pod, Deployment, StatefulSet, and DaemonSet summaries. Empty namespace searches all namespaces. Use name_contains for cluster-wide product or workload discovery.", Strict: true, Parameters: objectSchema(map[string]any{
+		{Type: "function", Function: investigation.ToolFunction{Name: "list_workloads", Description: "List bounded Pod, Deployment, StatefulSet, and DaemonSet summaries. Empty namespace searches all namespaces. Use name_contains for cluster-wide product discovery. For count questions, use matched_count only when count_complete is true.", Strict: true, Parameters: objectSchema(map[string]any{
 			"namespace": stringField(253), "kind": map[string]any{"type": "string", "enum": []string{"all", "pod", "deployment", "statefulset", "daemonset"}}, "label_selector": stringField(1024), "name_contains": stringField(253), "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": maxDiscoveryItems}, "max_bytes": maxBytesField,
 		}, "namespace", "kind", "label_selector", "name_contains", "limit", "max_bytes")}},
 		{Type: "function", Function: investigation.ToolFunction{Name: "describe_resource", Description: "Read a bounded status summary for an approved Kubernetes resource kind.", Strict: true, Parameters: objectSchema(map[string]any{
@@ -135,7 +135,7 @@ func (c *Client) execute(ctx context.Context, name, raw string) (string, error) 
 		if err != nil {
 			return "", err
 		}
-		return encodeToolOutput(value, args.MaxBytes)
+		return encodeWorkloadOutput(value, args.MaxBytes)
 	case "describe_resource", "list_events":
 		var args resourceArgs
 		if err := decodeStrict(raw, &args); err != nil {
@@ -287,6 +287,33 @@ func (c *Client) errorOutput(err error) string {
 	return boundJSONBytes(data, min(c.maxToolBytes, 4096))
 }
 
+func encodeWorkloadOutput(value workloadListResult, maxBytes int) (string, error) {
+	allItems := value.Items
+	low, high := 0, len(allItems)
+	var best []byte
+	for low <= high {
+		middle := low + (high-low)/2
+		candidate := value
+		candidate.Items = allItems[:middle]
+		candidate.ReturnedCount = middle
+		candidate.Truncated = value.Truncated || middle < len(allItems)
+		data, err := json.Marshal(map[string]any{"ok": true, "result": candidate})
+		if err != nil {
+			return "", err
+		}
+		if len(data) <= maxBytes {
+			best = data
+			low = middle + 1
+		} else {
+			high = middle - 1
+		}
+	}
+	if len(best) == 0 {
+		return "", fmt.Errorf("max_bytes too small for workload metadata")
+	}
+	return string(best), nil
+}
+
 func encodeToolOutput(value any, maxBytes int) (string, error) {
 	data, err := json.Marshal(map[string]any{"ok": true, "result": value})
 	if err != nil {
@@ -313,73 +340,114 @@ func boundJSONBytes(data []byte, maxBytes int) string {
 	if maxBytes <= 0 || len(data) <= maxBytes {
 		return string(data)
 	}
-	truncated, _ := json.Marshal(map[string]any{"ok": true, "truncated": true, "result": string(data[:max(0, maxBytes-80)])})
-	if len(truncated) > maxBytes {
-		truncated = []byte(`{"ok":false,"error":"tool output exceeded byte limit"}`)
+	low, high := 0, len(data)
+	var best []byte
+	for low <= high {
+		middle := low + (high-low)/2
+		candidate, _ := json.Marshal(map[string]any{
+			"ok":             true,
+			"truncated":      true,
+			"original_bytes": len(data),
+			"preview":        string(data[:middle]),
+		})
+		if len(candidate) <= maxBytes {
+			best = candidate
+			low = middle + 1
+		} else {
+			high = middle - 1
+		}
 	}
-	return string(truncated)
+	if len(best) == 0 {
+		return `{"ok":false,"error":"tool output byte limit too small"}`
+	}
+	return string(best)
 }
 
-func (c *Client) listWorkloads(ctx context.Context, args listArgs) ([]any, error) {
-	out := make([]any, 0, args.Limit)
-	appendValue := func(kind, name string, value any) bool {
+type workloadListResult struct {
+	MatchedCount   int   `json:"matched_count"`
+	ReturnedCount  int   `json:"returned_count"`
+	Truncated      bool  `json:"truncated"`
+	CountComplete  bool  `json:"count_complete"`
+	PerKindScanned int   `json:"per_kind_scan_limit"`
+	Items          []any `json:"items"`
+}
+
+func (c *Client) listWorkloads(ctx context.Context, args listArgs) (workloadListResult, error) {
+	const queryLimit int64 = 1000
+	result := workloadListResult{Items: make([]any, 0, args.Limit), CountComplete: true, PerKindScanned: int(queryLimit)}
+	appendValue := func(kind, name string, value any) {
 		if args.NameContains != "" && !strings.Contains(strings.ToLower(name), args.NameContains) {
-			return true
+			return
 		}
-		if len(out) >= args.Limit {
-			return false
+		result.MatchedCount++
+		if len(result.Items) >= args.Limit {
+			result.Truncated = true
+			return
 		}
-		out = append(out, map[string]any{"kind": kind, "resource": value})
-		return true
+		result.Items = append(result.Items, map[string]any{"kind": kind, "resource": value})
 	}
-	queryLimit := int64(args.Limit)
-	if args.NameContains != "" {
-		queryLimit = 1000
+	markIncomplete := func(continueToken string) {
+		if continueToken != "" {
+			result.CountComplete = false
+			result.Truncated = true
+		}
 	}
 	want := func(kind string) bool { return args.Kind == "all" || strings.EqualFold(args.Kind, kind) }
 	if want("pod") {
 		items, err := c.client.CoreV1().Pods(args.Namespace).List(ctx, metav1.ListOptions{LabelSelector: args.LabelSelector, Limit: queryLimit})
 		if err != nil {
-			return nil, err
+			return workloadListResult{}, err
 		}
+		markIncomplete(items.Continue)
 		for i := range items.Items {
-			if !appendValue("Pod", items.Items[i].Name, summarizePod(&items.Items[i])) {
-				return out, nil
+			pod := &items.Items[i]
+			ready := false
+			for _, condition := range pod.Status.Conditions {
+				if condition.Type == "Ready" && condition.Status == "True" {
+					ready = true
+					break
+				}
 			}
+			restarts := int32(0)
+			for _, container := range pod.Status.ContainerStatuses {
+				restarts += container.RestartCount
+			}
+			appendValue("Pod", pod.Name, map[string]any{"name": pod.Name, "namespace": pod.Namespace, "phase": pod.Status.Phase, "ready": ready, "restarts": restarts, "node": pod.Spec.NodeName})
 		}
 	}
 	if want("deployment") {
 		items, err := c.client.AppsV1().Deployments(args.Namespace).List(ctx, metav1.ListOptions{LabelSelector: args.LabelSelector, Limit: queryLimit})
 		if err != nil {
-			return nil, err
+			return workloadListResult{}, err
 		}
+		markIncomplete(items.Continue)
 		for i := range items.Items {
-			if !appendValue("Deployment", items.Items[i].Name, summarizeDeployment(&items.Items[i])) {
-				return out, nil
-			}
+			item := &items.Items[i]
+			appendValue("Deployment", item.Name, map[string]any{"name": item.Name, "namespace": item.Namespace, "replicas": item.Status.Replicas, "ready_replicas": item.Status.ReadyReplicas, "available_replicas": item.Status.AvailableReplicas})
 		}
 	}
 	if want("statefulset") {
 		items, err := c.client.AppsV1().StatefulSets(args.Namespace).List(ctx, metav1.ListOptions{LabelSelector: args.LabelSelector, Limit: queryLimit})
 		if err != nil {
-			return nil, err
+			return workloadListResult{}, err
 		}
+		markIncomplete(items.Continue)
 		for i := range items.Items {
-			if !appendValue("StatefulSet", items.Items[i].Name, summarizeStatefulSet(&items.Items[i])) {
-				return out, nil
-			}
+			item := &items.Items[i]
+			appendValue("StatefulSet", item.Name, map[string]any{"name": item.Name, "namespace": item.Namespace, "replicas": item.Status.Replicas, "ready_replicas": item.Status.ReadyReplicas, "current_replicas": item.Status.CurrentReplicas})
 		}
 	}
 	if want("daemonset") {
 		items, err := c.client.AppsV1().DaemonSets(args.Namespace).List(ctx, metav1.ListOptions{LabelSelector: args.LabelSelector, Limit: queryLimit})
 		if err != nil {
-			return nil, err
+			return workloadListResult{}, err
 		}
+		markIncomplete(items.Continue)
 		for i := range items.Items {
-			if !appendValue("DaemonSet", items.Items[i].Name, summarizeDaemonSet(&items.Items[i])) {
-				return out, nil
-			}
+			item := &items.Items[i]
+			appendValue("DaemonSet", item.Name, map[string]any{"name": item.Name, "namespace": item.Namespace, "desired": item.Status.DesiredNumberScheduled, "ready": item.Status.NumberReady, "available": item.Status.NumberAvailable})
 		}
 	}
-	return out, nil
+	result.ReturnedCount = len(result.Items)
+	return result, nil
 }
