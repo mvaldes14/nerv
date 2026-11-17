@@ -2,8 +2,10 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,6 +31,23 @@ func TestOpenAICompatibleGenerate(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer secret" {
 			t.Fatalf("unexpected authorization %q", got)
 		}
+
+		var request chatRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if request.Model != "virtual/nerv" {
+			t.Fatalf("unexpected model %q", request.Model)
+		}
+		if len(request.Messages) != 2 || request.Messages[0].Role != "system" || request.Messages[1].Role != "user" {
+			t.Fatalf("unexpected messages: %#v", request.Messages)
+		}
+		for _, want := range []string{"investigate", "Evidence:", "kubernetes: pod restarting"} {
+			if !strings.Contains(request.Messages[1].Content, want) {
+				t.Errorf("user message %q does not contain %q", request.Messages[1].Content, want)
+			}
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"chatcmpl-123","model":"routed-model","choices":[{"message":{"role":"assistant","content":"root cause"},"finish_reason":"stop"}],"usage":{"prompt_tokens":42,"completion_tokens":7}}`))
 	}))
