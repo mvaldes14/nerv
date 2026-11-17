@@ -51,23 +51,32 @@ type Decision struct {
 }
 
 type Generation struct {
-	Answer   string `json:"answer"`
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
+	Answer            string         `json:"answer"`
+	Confidence        string         `json:"confidence,omitempty"`
+	Uncertainty       []string       `json:"uncertainty,omitempty"`
+	RecommendedAction string         `json:"recommended_action,omitempty"`
+	ToolsUsed         []string       `json:"tools_used,omitempty"`
+	Evidence          []Evidence     `json:"evidence,omitempty"`
+	Provider          string         `json:"provider"`
+	Model             string         `json:"model"`
+	Budget            BudgetMetadata `json:"budget"`
 }
 
 type Finding struct {
-	ID          string     `json:"id"`
-	WorkflowID  string     `json:"workflow_id"`
-	Question    string     `json:"question"`
-	Answer      string     `json:"answer"`
-	Evidence    []Evidence `json:"evidence"`
-	Decision    Decision   `json:"decision"`
-	Confidence  string     `json:"confidence"`
-	Uncertainty []string   `json:"uncertainty,omitempty"`
-	Provider    string     `json:"provider"`
-	Model       string     `json:"model"`
-	CreatedAt   time.Time  `json:"created_at"`
+	ID                string         `json:"id"`
+	WorkflowID        string         `json:"workflow_id"`
+	Question          string         `json:"question"`
+	Answer            string         `json:"answer"`
+	Evidence          []Evidence     `json:"evidence"`
+	Decision          Decision       `json:"decision"`
+	Confidence        string         `json:"confidence"`
+	Uncertainty       []string       `json:"uncertainty,omitempty"`
+	RecommendedAction string         `json:"recommended_action,omitempty"`
+	ToolsUsed         []string       `json:"tools_used,omitempty"`
+	Budget            BudgetMetadata `json:"budget"`
+	Provider          string         `json:"provider"`
+	Model             string         `json:"model"`
+	CreatedAt         time.Time      `json:"created_at"`
 }
 
 type Accepted struct {
@@ -158,6 +167,8 @@ type Dependencies struct {
 	DBOS             dbos.Context
 	LLM              LLM
 	Collector        Collector
+	Tools            ToolExecutor
+	AgentBudget      AgentBudget
 	Decision         DecisionEngine
 	Store            Store
 	Notifier         Notifier
@@ -170,6 +181,8 @@ type Service struct {
 	dbos             dbos.Context
 	llm              LLM
 	collector        Collector
+	tools            ToolExecutor
+	agentBudget      AgentBudget
 	decision         DecisionEngine
 	store            Store
 	notifier         Notifier
@@ -194,10 +207,16 @@ func NewService(deps Dependencies) (*Service, error) {
 	if notifier == nil {
 		notifier = noopNotifier{}
 	}
+	budget := deps.AgentBudget
+	if budget.MaxRounds == 0 {
+		budget = AgentBudget{MaxRounds: 4, MaxToolCalls: 6, Timeout: 75 * time.Second, MaxTokens: 12000, ToolConcurrency: 2, ModelTimeout: 30 * time.Second, ToolTimeout: 30 * time.Second, MaxEvidenceBytes: 32 * 1024}
+	}
 	s := &Service{
 		dbos:             deps.DBOS,
 		llm:              deps.LLM,
 		collector:        deps.Collector,
+		tools:            deps.Tools,
+		agentBudget:      budget,
 		decision:         decision,
 		store:            deps.Store,
 		notifier:         notifier,
@@ -218,8 +237,8 @@ func (s *Service) ConfigName() string { return "nerv-investigation-service" }
 func (s *Service) Accept(ctx context.Context, req Request) (Accepted, error) {
 	req = normalizeRequest(req)
 	req.TraceParent, req.TraceState = telemetry.CaptureTraceContext(ctx)
-	if req.Question == "" {
-		return Accepted{}, fmt.Errorf("question is required")
+	if err := validateRequest(req); err != nil {
+		return Accepted{}, err
 	}
 	if req.ID == "" {
 		if req.IdempotencyKey == "" {
@@ -311,7 +330,7 @@ func (s *Service) Investigate(ctx dbos.Context, req Request) (finding Finding, w
 
 	evidence, err := dbos.RunAsStep(ctx, func(stepCtx context.Context) ([]Evidence, error) {
 		base := []Evidence{{Source: req.Source, Summary: triggerSummary(req)}}
-		if s.collector == nil {
+		if _, bounded := s.llm.(AgentLLM); bounded || s.collector == nil {
 			return base, nil
 		}
 		collected, collectErr := s.collector.Collect(telemetry.WithSpan(stepCtx, agentCtx), req)
@@ -320,14 +339,14 @@ func (s *Service) Investigate(ctx dbos.Context, req Request) (finding Finding, w
 			return base, nil
 		}
 		return append(base, collected...), nil
-	}, dbos.WithStepName("collect-evidence"), dbos.WithStepMaxRetries(2))
+	}, dbos.WithStepName("prepare-trigger-evidence"), dbos.WithStepMaxRetries(2))
 	if err != nil {
 		return Finding{}, err
 	}
 
 	_, err = dbos.RunAsStep(ctx, func(stepCtx context.Context) (string, error) {
 		return "persisted", s.store.SaveEvidence(stepCtx, req.ID, evidence)
-	}, dbos.WithStepName("persist-evidence"), dbos.WithStepMaxRetries(3))
+	}, dbos.WithStepName("persist-trigger-evidence"), dbos.WithStepMaxRetries(3))
 	if err != nil {
 		return Finding{}, err
 	}
@@ -341,11 +360,23 @@ func (s *Service) Investigate(ctx dbos.Context, req Request) (finding Finding, w
 
 	var generation Generation
 	if decision.Action == "suppress" {
-		generation = Generation{Answer: suppressionAnswer(decision), Provider: decision.Provider}
+		generation = Generation{Answer: suppressionAnswer(decision), Confidence: "unknown", Provider: decision.Provider}
+	} else if agentLLM, ok := s.llm.(AgentLLM); ok {
+		generation, err = s.runAgentLoop(ctx, agentCtx, agentLLM, req, decision, evidence[0])
+		if err != nil {
+			return Finding{}, err
+		}
+		evidence = append(evidence, generation.Evidence...)
+		_, err = dbos.RunAsStep(ctx, func(stepCtx context.Context) (string, error) {
+			return "persisted", s.store.SaveEvidence(stepCtx, req.ID, evidence)
+		}, dbos.WithStepName("persist-agent-evidence"), dbos.WithStepMaxRetries(3))
+		if err != nil {
+			return Finding{}, err
+		}
 	} else {
 		generation, err = dbos.RunAsStep(ctx, func(stepCtx context.Context) (Generation, error) {
 			answer, provider, model, generateErr := s.llm.Generate(telemetry.WithSpan(stepCtx, agentCtx), buildPrompt(req, decision), evidence)
-			return Generation{Answer: answer, Provider: provider, Model: model}, generateErr
+			return Generation{Answer: answer, Confidence: "unknown", Provider: provider, Model: model}, generateErr
 		}, dbos.WithStepName("agentgateway-llm"), dbos.WithStepMaxRetries(2))
 		if err != nil {
 			return Finding{}, err
@@ -353,17 +384,25 @@ func (s *Service) Investigate(ctx dbos.Context, req Request) (finding Finding, w
 	}
 
 	finding, err = dbos.RunAsStep(ctx, func(context.Context) (Finding, error) {
+		confidence := generation.Confidence
+		if confidence == "" {
+			confidence = "unknown"
+		}
 		return Finding{
-			ID:         req.ID,
-			WorkflowID: workflowID,
-			Question:   req.Question,
-			Answer:     generation.Answer,
-			Evidence:   evidence,
-			Decision:   decision,
-			Confidence: "unknown",
-			Provider:   generation.Provider,
-			Model:      generation.Model,
-			CreatedAt:  time.Now().UTC(),
+			ID:                req.ID,
+			WorkflowID:        workflowID,
+			Question:          req.Question,
+			Answer:            generation.Answer,
+			Evidence:          evidence,
+			Decision:          decision,
+			Confidence:        confidence,
+			Uncertainty:       generation.Uncertainty,
+			RecommendedAction: generation.RecommendedAction,
+			ToolsUsed:         generation.ToolsUsed,
+			Budget:            generation.Budget,
+			Provider:          generation.Provider,
+			Model:             generation.Model,
+			CreatedAt:         time.Now().UTC(),
 		}, nil
 	}, dbos.WithStepName("build-finding"))
 	if err != nil {
@@ -436,6 +475,29 @@ func (defaultDecisionEngine) Evaluate(context.Context, Request, []Evidence) (Dec
 type noopNotifier struct{}
 
 func (noopNotifier) Send(context.Context, Finding) (string, error) { return "disabled", nil }
+
+func validateRequest(req Request) error {
+	if req.Question == "" {
+		return fmt.Errorf("question is required")
+	}
+	if len([]rune(req.Question)) > 4000 {
+		return fmt.Errorf("question exceeds 4000 characters")
+	}
+	if req.Target != nil {
+		fields := []struct{ name, value string }{
+			{name: "target namespace", value: req.Target.Namespace},
+			{name: "target kind", value: req.Target.Kind},
+			{name: "target name", value: req.Target.Name},
+			{name: "target container", value: req.Target.Container},
+		}
+		for _, field := range fields {
+			if len([]rune(field.value)) > 253 {
+				return fmt.Errorf("%s exceeds 253 characters", field.name)
+			}
+		}
+	}
+	return nil
+}
 
 func normalizeRequest(req Request) Request {
 	req.Question = strings.TrimSpace(req.Question)

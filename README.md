@@ -19,7 +19,7 @@ NERV starts the same investigation workflow from two inputs:
 - client-go informers for sustained Pod and workload failures
 - the embedded private operator UI at `/ui/`
 
-The workflow collects resource state, events, logs, previous logs, and owner references. Operator questions receive a local `investigate` decision; alerts and autonomous detections use Decision Gateway to choose whether to suppress, investigate, research, or escalate. Agentgateway handles non-suppressed LLM requests. NERV persists the result and sends a Gotify notification.
+For non-suppressed work, bounded durable agent loop lets model discover workloads and choose approved typed read-only tools for status, events, logs, owner chains, and nodes. Operator questions receive local `investigate` decision; alerts and autonomous detections use Decision Gateway to choose whether to suppress, investigate, research, or escalate. Every model round and tool execution is separate DBOS checkpoint. NERV persists executed evidence, structured finding, budget accounting, and Gotify notification.
 
 ```text
 question or alert
@@ -149,9 +149,10 @@ docs/                 architecture, API, and testing notes
 
 - Kubernetes access is read-only.
 - Tools use `client-go`; NERV does not execute shell commands.
-- Logs and serialized evidence have size limits.
+- Agent rounds, tool calls, tokens, time, concurrency, logs, evidence, and tool output have validated limits.
 - Logs, events, status messages, and annotations are treated as untrusted input.
-- GenAI telemetry records operation metadata and token usage, not prompts, evidence, model output, or tool payloads.
+- Agentgateway fallback is disabled unless `NERV_LLM_FALLBACK_MODEL` is explicitly configured, and only retryable primary provider/transport failures qualify.
+- GenAI telemetry records operation, tool, budget, model, finish, and token metadata—not prompts, evidence, model output, or tool payloads.
 - API routes require bearer authentication when `NERV_AUTH_TOKEN` is set. Configure it for every private or shared deployment.
 - Operator UI stores bearer token in per-tab `sessionStorage` with a 30-minute expiry; token is never embedded in served HTML or JavaScript.
 - NERV has no public ingress in the base manifests.

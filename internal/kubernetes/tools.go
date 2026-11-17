@@ -23,7 +23,9 @@ import (
 const maxEvidenceBytes = 32 * 1024
 
 type Client struct {
-	client kubernetes.Interface
+	client          kubernetes.Interface
+	maxToolBytes    int
+	maxLogTailLines int64
 }
 
 func New(kubeconfig string) (*Client, error) {
@@ -45,10 +47,21 @@ func New(kubeconfig string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create Kubernetes client: %w", err)
 	}
-	return &Client{client: client}, nil
+	return &Client{client: client, maxToolBytes: maxEvidenceBytes, maxLogTailLines: 1000}, nil
 }
 
-func NewWithClient(client kubernetes.Interface) *Client { return &Client{client: client} }
+func NewWithClient(client kubernetes.Interface) *Client {
+	return &Client{client: client, maxToolBytes: maxEvidenceBytes, maxLogTailLines: 1000}
+}
+
+func (c *Client) ConfigureAgentTools(maxOutputBytes int, maxTailLines int64) {
+	if maxOutputBytes > 0 {
+		c.maxToolBytes = maxOutputBytes
+	}
+	if maxTailLines > 0 {
+		c.maxLogTailLines = maxTailLines
+	}
+}
 
 func (c *Client) Clientset() kubernetes.Interface { return c.client }
 

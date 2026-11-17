@@ -86,6 +86,9 @@ CREATE TABLE IF NOT EXISTS nerv.findings (
     decision jsonb NOT NULL,
     confidence text NOT NULL DEFAULT 'unknown',
     uncertainty jsonb NOT NULL DEFAULT '[]'::jsonb,
+    recommended_action text NOT NULL DEFAULT '',
+    tools_used jsonb NOT NULL DEFAULT '[]'::jsonb,
+    budget jsonb NOT NULL DEFAULT '{}'::jsonb,
     provider text NOT NULL DEFAULT '',
     model text NOT NULL DEFAULT '',
     created_at timestamptz NOT NULL
@@ -111,6 +114,9 @@ CREATE TABLE IF NOT EXISTS nerv.notification_attempts (
 
 ALTER TABLE nerv.findings ADD COLUMN IF NOT EXISTS confidence text NOT NULL DEFAULT 'unknown';
 ALTER TABLE nerv.findings ADD COLUMN IF NOT EXISTS uncertainty jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE nerv.findings ADD COLUMN IF NOT EXISTS recommended_action text NOT NULL DEFAULT '';
+ALTER TABLE nerv.findings ADD COLUMN IF NOT EXISTS tools_used jsonb NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE nerv.findings ADD COLUMN IF NOT EXISTS budget jsonb NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE INDEX IF NOT EXISTS incidents_status_updated_idx ON nerv.incidents(status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS incident_correlations_incident_idx ON nerv.incident_correlations(incident_id);
@@ -237,18 +243,29 @@ func (p *Postgres) SaveFinding(ctx context.Context, finding investigation.Findin
 	if err != nil {
 		return fmt.Errorf("encode uncertainty: %w", err)
 	}
+	toolsUsed, err := json.Marshal(finding.ToolsUsed)
+	if err != nil {
+		return fmt.Errorf("encode tools used: %w", err)
+	}
+	budget, err := json.Marshal(finding.Budget)
+	if err != nil {
+		return fmt.Errorf("encode budget: %w", err)
+	}
 	_, err = p.pool.Exec(ctx, `
-INSERT INTO nerv.findings (incident_id, workflow_id, answer, decision, confidence, uncertainty, provider, model, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+INSERT INTO nerv.findings (incident_id, workflow_id, answer, decision, confidence, uncertainty, recommended_action, tools_used, budget, provider, model, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 ON CONFLICT (incident_id) DO UPDATE SET
     answer = EXCLUDED.answer,
     decision = EXCLUDED.decision,
     confidence = EXCLUDED.confidence,
     uncertainty = EXCLUDED.uncertainty,
+    recommended_action = EXCLUDED.recommended_action,
+    tools_used = EXCLUDED.tools_used,
+    budget = EXCLUDED.budget,
     provider = EXCLUDED.provider,
     model = EXCLUDED.model,
     created_at = EXCLUDED.created_at`,
-		finding.ID, finding.WorkflowID, finding.Answer, decision, finding.Confidence, uncertainty, finding.Provider, finding.Model, finding.CreatedAt)
+		finding.ID, finding.WorkflowID, finding.Answer, decision, finding.Confidence, uncertainty, finding.RecommendedAction, toolsUsed, budget, finding.Provider, finding.Model, finding.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("save finding: %w", err)
 	}
@@ -279,14 +296,15 @@ WHERE incident_id = $1`, incidentID)
 
 func (p *Postgres) GetInvestigation(ctx context.Context, incidentID string) (investigation.Investigation, error) {
 	var detail investigation.Investigation
-	var targetJSON, labelsJSON, annotationsJSON, decisionJSON, uncertaintyJSON []byte
+	var targetJSON, labelsJSON, annotationsJSON, decisionJSON, uncertaintyJSON, toolsUsedJSON, budgetJSON []byte
 	var finding investigation.Finding
 	var hasFinding bool
 	err := p.pool.QueryRow(ctx, `
 SELECT i.id, i.workflow_id, i.source, i.question, i.status, i.target, i.labels, i.annotations,
        i.created_at, i.updated_at, f.incident_id IS NOT NULL,
        COALESCE(f.answer, ''), COALESCE(f.decision, '{}'::jsonb), COALESCE(f.confidence, 'unknown'),
-       COALESCE(f.uncertainty, '[]'::jsonb), COALESCE(f.provider, ''),
+       COALESCE(f.uncertainty, '[]'::jsonb), COALESCE(f.recommended_action, ''),
+       COALESCE(f.tools_used, '[]'::jsonb), COALESCE(f.budget, '{}'::jsonb), COALESCE(f.provider, ''),
        COALESCE(f.model, ''), COALESCE(f.created_at, i.created_at)
 FROM nerv.incidents i
 LEFT JOIN nerv.findings f ON f.incident_id = i.id
@@ -294,8 +312,8 @@ WHERE i.id = $1`, incidentID).Scan(
 		&detail.Incident.ID, &detail.Incident.WorkflowID, &detail.Incident.Source,
 		&detail.Incident.Question, &detail.Incident.Status, &targetJSON, &labelsJSON,
 		&annotationsJSON, &detail.Incident.CreatedAt, &detail.Incident.UpdatedAt, &hasFinding,
-		&finding.Answer, &decisionJSON, &finding.Confidence, &uncertaintyJSON, &finding.Provider,
-		&finding.Model, &finding.CreatedAt,
+		&finding.Answer, &decisionJSON, &finding.Confidence, &uncertaintyJSON, &finding.RecommendedAction,
+		&toolsUsedJSON, &budgetJSON, &finding.Provider, &finding.Model, &finding.CreatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return investigation.Investigation{}, fmt.Errorf("incident %q not found", incidentID)
@@ -335,6 +353,12 @@ WHERE i.id = $1`, incidentID).Scan(
 		}
 		if err := json.Unmarshal(uncertaintyJSON, &finding.Uncertainty); err != nil {
 			return investigation.Investigation{}, fmt.Errorf("decode uncertainty: %w", err)
+		}
+		if err := json.Unmarshal(toolsUsedJSON, &finding.ToolsUsed); err != nil {
+			return investigation.Investigation{}, fmt.Errorf("decode tools used: %w", err)
+		}
+		if err := json.Unmarshal(budgetJSON, &finding.Budget); err != nil {
+			return investigation.Investigation{}, fmt.Errorf("decode budget: %w", err)
 		}
 		detail.Finding = &finding
 	}

@@ -53,6 +53,22 @@ func StartWorkflow(ctx context.Context, provider, model, traceparent, tracestate
 	return ctx, &OperationSpan{span: span}
 }
 
+func StartAgent(ctx context.Context, provider, model string, maxRounds, maxToolCalls, maxTokens int) (context.Context, *OperationSpan) {
+	attrs := []attribute.KeyValue{
+		attribute.String("gen_ai.operation.name", "invoke_agent"),
+		attribute.String("gen_ai.agent.name", "NERV"),
+		attribute.String("gen_ai.provider.name", provider),
+		attribute.Int("nerv.agent.max_rounds", maxRounds),
+		attribute.Int("nerv.agent.max_tool_calls", maxToolCalls),
+		attribute.Int("nerv.agent.max_tokens", maxTokens),
+	}
+	if model != "" {
+		attrs = append(attrs, attribute.String("gen_ai.request.model", model))
+	}
+	ctx, span := otel.Tracer(instrumentationName).Start(ctx, "invoke_agent NERV", trace.WithSpanKind(trace.SpanKindInternal), trace.WithAttributes(attrs...))
+	return ctx, &OperationSpan{span: span}
+}
+
 func StartTool(ctx context.Context, name, toolType, callID string) (context.Context, *OperationSpan) {
 	attrs := []attribute.KeyValue{
 		attribute.String("gen_ai.operation.name", "execute_tool"),
@@ -76,6 +92,18 @@ func StartTool(ctx context.Context, name, toolType, callID string) (context.Cont
 
 func WithSpan(ctx, spanCtx context.Context) context.Context {
 	return trace.ContextWithSpan(ctx, trace.SpanFromContext(spanCtx))
+}
+
+func (s *OperationSpan) AgentResult(rounds, toolCalls, tokens int, stopReason string) {
+	attrs := []attribute.KeyValue{
+		attribute.Int("nerv.agent.rounds_used", rounds),
+		attribute.Int("nerv.agent.tool_calls_used", toolCalls),
+		attribute.Int("nerv.agent.tokens_used", tokens),
+	}
+	if stopReason != "" {
+		attrs = append(attrs, attribute.String("nerv.agent.stop_reason", stopReason))
+	}
+	s.span.SetAttributes(attrs...)
 }
 
 func (s *OperationSpan) End(err error, errorType string) {

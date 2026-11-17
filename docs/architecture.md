@@ -23,16 +23,16 @@ NERV is a Go service that runs inside Kubernetes. It uses DBOS for durable execu
 1. Normalize the request and assign an incident ID.
 2. Start the workflow with a stable DBOS workflow ID.
 3. Persist the incident in the `nerv` PostgreSQL schema.
-4. Collect Kubernetes evidence when the request includes a target.
-5. Persist evidence before calling AI services.
-6. Route the decision by explicit intake source. Operator questions (`http.ask` and `cli`) receive a local `investigate` decision; alerts and autonomous Kubernetes failures use the configured Decision Gateway.
-7. Skip the LLM when the decision is `suppress` and build a policy outcome containing the decision reason, provider, and request ID when available.
-8. Otherwise, send the question and evidence to Agentgateway.
-9. Persist the finding.
-10. Send the finding to Gotify.
-11. Mark the incident complete.
+4. Persist normalized trigger evidence and route the decision by explicit intake source. Operator questions (`http.ask` and `cli`) receive a local `investigate` decision; alerts and autonomous Kubernetes failures use configured Decision Gateway.
+5. Skip Agentgateway when decision is `suppress` and build policy outcome containing decision reason, provider, and request ID when available.
+6. Otherwise start bounded agent loop with question, trigger evidence, optional target, strict read-only tool definitions, and structured finding schema.
+7. Run each model round as deterministic DBOS step. Model may return final structured finding or request approved tools.
+8. Validate every tool call. Unknown, malformed, unsafe, duplicate, and over-budget calls return bounded error results and never reach Kubernetes.
+9. Run independent tool calls as named DBOS steps with concurrency cap, append results as untrusted tool messages, and persist tool evidence.
+10. Stop deterministically on structured final finding or round, tool, token, time, or known-cost budget boundary.
+11. Persist finding, send it to Gotify, and mark incident complete.
 
-External calls and database writes run as separate DBOS steps. Recovery reuses completed step results.
+Completed model and tool steps replay from DBOS state after recovery instead of repeating external calls.
 
 ## GenAI telemetry
 
@@ -40,7 +40,7 @@ Agentgateway inference emits OpenTelemetry GenAI semantic-convention spans. Each
 
 Prompt text, Kubernetes evidence, model output, system instructions, and tool payloads are not recorded in telemetry. These fields can contain credentials, personal data, or untrusted workload content.
 
-The current deterministic investigation emits an `invoke_workflow NERV` internal span with `execute_tool <tool>` child spans for Kubernetes evidence collection. When the bounded loop allows the model to control tool selection, that agent-controlled section will emit `invoke_agent NERV`. DBOS recovery does not depend on keeping one span open across process restarts: intake trace context is serialized into workflow input, and each execution or recovery attempt links back to the originating intake span.
+Investigation emits `invoke_workflow NERV`, nested `invoke_agent NERV`, one `chat <model>` span per primary/fallback attempt, and one `execute_tool <tool>` span per validated executor call. Spans include low-cardinality model, finish, token, budget-limit, tool-name, call-ID, and error metadata only. DBOS recovery does not depend on keeping one span open across process restarts: intake trace context is serialized into workflow input, and each execution or recovery attempt links back to originating intake span.
 
 Telemetry conformance will be checked against a pinned GenAI semantic-convention registry with OpenTelemetry Weaver. Semantic violations should fail the conformance test; coverage reporting remains non-blocking.
 
@@ -60,17 +60,16 @@ Conditions must persist for a configured threshold. Brief recovery clears pendin
 
 ## Kubernetes evidence
 
-NERV supports these read operations:
+Model receives only explicit typed read operations:
 
-- get and list pods
-- current and previous container logs
-- pod owner chain
-- resource summaries for Pods, Deployments, StatefulSets, DaemonSets, and Nodes
-- Kubernetes events attached to a resource
+- list Pods, Deployments, StatefulSets, and DaemonSets in one namespace or all namespaces
+- describe Pods, Deployments, StatefulSets, DaemonSets, and Nodes
+- list attached Kubernetes Events
+- current and previous Pod logs
+- Pod owner chain
+- get Node status summary
 
-Resource summaries exclude environment variables, annotations, managed fields, and full pod specs. This keeps prompts smaller and avoids sending unrelated configuration to the model.
-
-The collector limits each serialized evidence item to 32 KiB and pod logs to the latest 200 lines.
+Schemas reject extra properties and bound selectors, discovery count, log tails, and output bytes. Resource summaries exclude environment variables, annotations, managed fields, and full Pod specs. No shell, exec, Helm, arbitrary URL, generic resource client, Secret/ConfigMap read, or mutation tool exists.
 
 ## Source-aware decision routing
 
@@ -125,8 +124,8 @@ NERV does not expose a shell tool or a generic Kubernetes client to the model. P
 
 - PostgreSQL unavailable at startup: NERV fails to start.
 - PostgreSQL unavailable after startup: readiness fails, workflow steps retry according to DBOS policy, and detector acceptance retries only on bounded informer resyncs.
-- Kubernetes API unavailable: the finding records collection failure as evidence and can continue.
+- Kubernetes API unavailable: tool returns bounded error evidence and model may continue or report uncertainty.
 - Decision Gateway unavailable: its step retries, then the workflow fails if retries are exhausted.
-- Agentgateway unavailable: its step retries, then the workflow fails if retries are exhausted.
+- Agentgateway unavailable: primary retries are bounded; configured fallback runs once only for eligible transport/provider failure. With no fallback or failed fallback, workflow fails.
 - Gotify unavailable: notification retries without rerunning completed investigation steps.
 - NERV restarts: DBOS resumes incomplete workflows from PostgreSQL; informer startup reconciliation re-evaluates current cluster state without multiplying stable workflow identities.

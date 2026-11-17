@@ -9,7 +9,8 @@ NERV reads configuration from environment variables. The Kubernetes manifests lo
 | `DATABASE_URL` | required | PostgreSQL URL used by DBOS and NERV tables |
 | `KUBECONFIG` | standard client-go lookup | Local Kubernetes configuration; in-cluster auth is preferred |
 | `NERV_LLM_PROVIDER` | `agentgateway` | LLM provider name; use `echo` for local tests |
-| `NERV_LLM_MODEL` | `openai/gpt-5-mini` | Model sent to Agentgateway |
+| `NERV_LLM_MODEL` | `openai/gpt-5-mini` | Primary model sent to Agentgateway |
+| `NERV_LLM_FALLBACK_MODEL` | empty | Optional fallback model; disabled by default and used only after retryable primary provider/transport failures |
 | `NERV_AGENTGATEWAY_URL` | empty | OpenAI-compatible Agentgateway base URL |
 | `NERV_AGENTGATEWAY_TOKEN` | empty | Optional Agentgateway caller token |
 | `NERV_DECISION_GATEWAY_URL` | empty | Decision Gateway base URL; empty uses local investigate policy |
@@ -18,7 +19,19 @@ NERV reads configuration from environment variables. The Kubernetes manifests lo
 | `NERV_DECISION_VERSION` | `v1` | Decision contract version |
 | `NERV_GOTIFY_URL` | empty | Gotify base URL; empty disables delivery |
 | `NERV_GOTIFY_TOKEN` | empty | Gotify application token |
-| `NERV_HTTP_TIMEOUT` | `30s` | Outbound HTTP timeout |
+| `NERV_HTTP_TIMEOUT` | `30s` | General outbound HTTP timeout |
+| `NERV_AGENT_MAX_ROUNDS` | `4` | Maximum model rounds per investigation |
+| `NERV_AGENT_MAX_TOOL_CALLS` | `6` | Maximum requested tool calls; rejected calls consume budget |
+| `NERV_AGENT_TIMEOUT` | `75s` | Total agent-loop wall-clock budget |
+| `NERV_AGENT_MAX_TOKENS` | `12000` | Aggregate known input and output token budget across rounds/fallback |
+| `NERV_AGENT_TOOL_CONCURRENCY` | `2` | Maximum concurrent durable tool steps |
+| `NERV_AGENT_MODEL_TIMEOUT` | `30s` | Per model-attempt timeout |
+| `NERV_AGENT_TOOL_TIMEOUT` | `30s` | Per tool-execution timeout |
+| `NERV_AGENT_MAX_EVIDENCE_BYTES` | `32768` | Aggregate persisted agent-tool evidence byte limit |
+| `NERV_AGENT_MAX_TOOL_OUTPUT_BYTES` | `32768` | Maximum output bytes accepted from one tool |
+| `NERV_AGENT_MAX_COST_USD` | `0` | Optional known-cost ceiling; zero disables cost ceiling |
+| `NERV_AGENT_INPUT_PRICE_PER_MILLION_TOKENS_USD` | `0` | Input-token price used for cost accounting |
+| `NERV_AGENT_OUTPUT_PRICE_PER_MILLION_TOKENS_USD` | `0` | Output-token price used for cost accounting |
 | `NERV_DETECTION_ENABLED` | `false` | Run autonomous Kubernetes detection with `serve`; the base manifest enables it explicitly |
 | `NERV_DETECTION_PERSISTENCE` | `2m` | Time a deterministic failure must remain present before workflow acceptance |
 | `NERV_DETECTION_COOLDOWN` | `30m` | Minimum interval before a recovered failure identity can open another investigation |
@@ -31,6 +44,8 @@ NERV reads configuration from environment variables. The Kubernetes manifests lo
 | `NERV_DETECTION_MAINTENANCE_ANNOTATION` | `nerv.io/maintenance` | Resource annotation that suppresses detection when set to `true` or present with an empty value |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | empty | OTLP gRPC host and port; empty disables HTTP, service, and GenAI trace export |
 | `OTEL_EXPORTER_OTLP_INSECURE` | `true` | Use plaintext OTLP gRPC |
+
+Agent limits must be positive and within built-in safety caps. Startup fails on invalid values. Configure both price variables together; configuring a cost ceiling without both prices also fails startup. When prices are absent, token limits still apply and findings report cost accounting as `unknown_disabled` rather than inventing a cost.
 
 ## Autonomous detection behavior
 

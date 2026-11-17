@@ -91,6 +91,81 @@ func TestOpenAICompatibleGenerate(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatibleCompleteSupportsToolsAndStructuredResponse(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var request chatRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if len(request.Tools) != 1 || request.ToolChoice != "auto" || request.ResponseFormat == nil || request.MaxCompletionTokens != 512 {
+			t.Fatalf("missing agent fields: %#v", request)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"call","model":"primary","choices":[{"message":{"role":"assistant","tool_calls":[{"id":"tool-1","type":"function","function":{"name":"list_workloads","arguments":"{\"namespace\":\"\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":3,"total_tokens":13}}`))
+	}))
+	defer server.Close()
+	client := NewOpenAICompatible(server.URL, "", "agentgateway", "primary", time.Second)
+	response, err := client.Complete(context.Background(), investigation.AgentRequest{
+		Messages:        []investigation.AgentMessage{{Role: "user", Content: "discover"}},
+		Tools:           []investigation.ToolDefinition{{Type: "function", Function: investigation.ToolFunction{Name: "list_workloads", Strict: true, Parameters: map[string]any{"type": "object"}}}},
+		ToolChoice:      "auto",
+		ResponseFormat:  map[string]any{"type": "json_schema"},
+		MaxOutputTokens: 512,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || len(response.Message.ToolCalls) != 1 || response.Usage.TotalTokens != 13 || response.FinishReason != "tool_calls" {
+		t.Fatalf("unexpected response: %#v calls=%d", response, calls)
+	}
+}
+
+func TestOpenAICompatibleFallbackOnlyAfterRetryablePrimaryFailure(t *testing.T) {
+	var models []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request chatRequest
+		_ = json.NewDecoder(r.Body).Decode(&request)
+		models = append(models, request.Model)
+		if request.Model == "primary" {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"fallback","model":"fallback","choices":[{"message":{"role":"assistant","content":"{\"answer\":\"ok\"}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":2}}`))
+	}))
+	defer server.Close()
+	client := NewOpenAICompatible(server.URL, "", "agentgateway", "primary", time.Second)
+	client.SetFallbackModel("fallback")
+	response, err := client.Complete(context.Background(), investigation.AgentRequest{Messages: []investigation.AgentMessage{{Role: "user", Content: "test"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(models, ","); got != "primary,primary,fallback" {
+		t.Fatalf("model attempts = %s", got)
+	}
+	if !response.FallbackUsed || response.Model != "fallback" || response.Attempts != 3 {
+		t.Fatalf("fallback metadata = %#v", response)
+	}
+}
+
+func TestOpenAICompatibleDoesNotFallbackOnInvalidResponse(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer server.Close()
+	client := NewOpenAICompatible(server.URL, "", "agentgateway", "primary", time.Second)
+	client.SetFallbackModel("fallback")
+	_, err := client.Complete(context.Background(), investigation.AgentRequest{Messages: []investigation.AgentMessage{{Role: "user", Content: "test"}}})
+	if err == nil || calls != 1 {
+		t.Fatalf("err=%v calls=%d", err, calls)
+	}
+}
+
 func TestOpenAICompatibleGenerateRecordsHTTPError(t *testing.T) {
 	recorder := tracetest.NewSpanRecorder()
 	tracerProvider := sdktrace.NewTracerProvider()

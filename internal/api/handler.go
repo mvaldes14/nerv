@@ -27,16 +27,18 @@ type investigationService interface {
 }
 
 type Dependencies struct {
-	Service   investigationService
-	AuthToken string
-	Logger    *slog.Logger
+	Service    investigationService
+	AuthToken  string
+	AskTimeout time.Duration
+	Logger     *slog.Logger
 }
 
 type Handler struct {
-	mux       *http.ServeMux
-	service   investigationService
-	authToken string
-	logger    *slog.Logger
+	mux        *http.ServeMux
+	service    investigationService
+	authToken  string
+	logger     *slog.Logger
+	askTimeout time.Duration
 }
 
 func NewHandler(deps Dependencies) http.Handler {
@@ -44,7 +46,11 @@ func NewHandler(deps Dependencies) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	h := &Handler{mux: http.NewServeMux(), service: deps.Service, authToken: deps.AuthToken, logger: logger}
+	askTimeout := deps.AskTimeout
+	if askTimeout <= 0 {
+		askTimeout = 90 * time.Second
+	}
+	h := &Handler{mux: http.NewServeMux(), service: deps.Service, authToken: deps.AuthToken, logger: logger, askTimeout: askTimeout}
 	h.routes()
 	return otelhttp.NewHandler(h, "nerv.http")
 }
@@ -88,7 +94,7 @@ func (h *Handler) ask(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "question is required")
 		return
 	}
-	ctx, cancel := contextWithDefaultTimeout(r, 60*time.Second)
+	ctx, cancel := contextWithDefaultTimeout(r, h.askTimeout)
 	defer cancel()
 	finding, err := h.service.Ask(ctx, req)
 	if err != nil {
