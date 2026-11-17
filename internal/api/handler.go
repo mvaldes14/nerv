@@ -13,6 +13,7 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
+	"github.com/mvaldes14/nerv/internal/detection"
 	"github.com/mvaldes14/nerv/internal/investigation"
 )
 
@@ -162,8 +163,43 @@ func alertRequest(receiver string, alert alertmanagerAlert) investigation.Reques
 	}
 	if name != "" {
 		req.Target = &investigation.Target{Namespace: alert.Labels["namespace"], Kind: kind, Name: name, Container: alert.Labels["container"]}
+		if failure := alertFailureIdentity(kind, alert); failure != "" {
+			req.IdempotencyKey = investigation.CorrelationKey(req.Target, failure)
+		}
 	}
 	return req
+}
+
+func alertFailureIdentity(kind string, alert alertmanagerAlert) string {
+	if failure := strings.TrimSpace(alert.Labels["nerv_failure"]); failure != "" {
+		return failure
+	}
+	text := strings.ToLower(strings.Join([]string{
+		alert.Labels["alertname"],
+		alert.Labels["reason"],
+		alert.Annotations["summary"],
+		alert.Annotations["description"],
+	}, " "))
+	switch {
+	case strings.Contains(text, "crashloopbackoff") || strings.Contains(text, "crash loop"):
+		return detection.FailureCrashLoop
+	case strings.Contains(text, "imagepullbackoff") || strings.Contains(text, "errimagepull") || strings.Contains(text, "image pull"):
+		return detection.FailureImagePull
+	case strings.Contains(text, "unschedulable"):
+		return detection.FailureUnschedulable
+	case kind == "pod" && strings.Contains(text, "restart"):
+		return detection.FailureContainerRestarts
+	case kind == "deployment" && (strings.Contains(text, "rollout") || strings.Contains(text, "progressdeadline")):
+		return detection.FailureDeploymentRollout
+	case kind == "deployment" && strings.Contains(text, "unavailable"):
+		return detection.FailureDeploymentUnavailable
+	case kind == "statefulset" && strings.Contains(text, "unavailable"):
+		return detection.FailureStatefulUnavailable
+	case kind == "daemonset" && strings.Contains(text, "unavailable"):
+		return detection.FailureDaemonUnavailable
+	default:
+		return ""
+	}
 }
 
 func firstNonEmpty(values ...string) string {

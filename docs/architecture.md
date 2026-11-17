@@ -7,6 +7,7 @@ NERV is a Go service that runs inside Kubernetes. It uses DBOS for durable execu
 | Component | Responsibility |
 | --- | --- |
 | HTTP API | Accept operator questions and Alertmanager-compatible webhooks |
+| Kubernetes detector | Reconcile Pod and workload informer state into deterministic failure conditions |
 | DBOS | Checkpoint workflow steps and recover interrupted investigations |
 | PostgreSQL | Store DBOS state and NERV reporting tables |
 | Kubernetes tools | Read pods, workloads, nodes, events, logs, and owner references |
@@ -17,7 +18,7 @@ NERV is a Go service that runs inside Kubernetes. It uses DBOS for durable execu
 
 ## Investigation workflow
 
-Both `/ask` and `/alert` start `nerv.investigate`.
+`/ask`, `/alert`, and qualified autonomous Kubernetes failures start `nerv.investigate`.
 
 1. Normalize the request and assign an incident ID.
 2. Start the workflow with a stable DBOS workflow ID.
@@ -45,13 +46,21 @@ Telemetry conformance will be checked against a pinned GenAI semantic-convention
 
 ## Incident identity
 
-Operator questions receive a new UUID unless the caller supplies `idempotency_key`. Alerts use their fingerprint as the idempotency key. DBOS returns the existing workflow when the same workflow ID already exists.
+Operator questions receive a new UUID unless the caller supplies `idempotency_key`. Idempotency keys are source-independent. Autonomous failures use a canonical key containing namespace, kind, name, container, and deterministic failure class. Recognized external alerts build the same key; other alerts retain their Alertmanager fingerprint. PostgreSQL resolves that key to one active incident ID transactionally, and DBOS uses the incident ID as workflow identity. This suppresses overlapping watcher, reconnect, and external intake across process restarts.
 
-Current alert deduplication is permanent for a fingerprint. Incident windows and reopening policy belong in the autonomous detection phase.
+Detector state also suppresses repeated informer updates while a condition remains active. Recovery clears in-memory active state. Completed correlations remain mapped to their incident through the configured cooldown, then may resolve to a new incident ID. Correlations whose workflows are still running remain active, preventing downstream PostgreSQL or AI failures from causing unbounded new work.
+
+## Autonomous Kubernetes detection
+
+Shared client-go informers watch Pods, Deployments, StatefulSets, and DaemonSets. Initial cache lists provide startup reconciliation; client-go relists and periodic resyncs provide reconnect reconciliation. A bounded, deduplicating queue feeds fixed workers, so event storms cannot create goroutine-per-event or unbounded work.
+
+Pure rules detect CrashLoopBackOff, image pull failures, sustained unschedulable Pending Pods, repeated unexpected container restarts, failed or unavailable Deployments, and unavailable StatefulSets or DaemonSets. Observed workload generation must be current. Kubernetes Events are not used as historical state. Maintenance annotations suppress resource evaluation.
+
+Conditions must persist for a configured threshold. Brief recovery clears pending state. Qualified requests go through `Service.Accept` and the same DBOS workflow as HTTP intake. Acceptance errors remain retryable on later resync; accepted work is suppressed before Decision Gateway or LLM calls.
 
 ## Kubernetes evidence
 
-Phase 1 supports these read operations:
+NERV supports these read operations:
 
 - get and list pods
 - current and previous container logs
@@ -84,6 +93,7 @@ DBOS creates its system tables in the `dbos` schema. NERV creates product tables
 - `nerv.incidents`
 - `nerv.evidence`
 - `nerv.findings`
+- `nerv.incident_correlations`
 - `nerv.notification_attempts`
 
 NERV runs its schema migration during startup. Readiness fails when PostgreSQL is unavailable.
@@ -103,9 +113,9 @@ NERV does not expose a shell tool or a generic Kubernetes client to the model. P
 ## Failure behavior
 
 - PostgreSQL unavailable at startup: NERV fails to start.
-- PostgreSQL unavailable after startup: readiness fails and workflow steps retry according to DBOS policy.
+- PostgreSQL unavailable after startup: readiness fails, workflow steps retry according to DBOS policy, and detector acceptance retries only on bounded informer resyncs.
 - Kubernetes API unavailable: the finding records collection failure as evidence and can continue.
 - Decision Gateway unavailable: its step retries, then the workflow fails if retries are exhausted.
 - Agentgateway unavailable: its step retries, then the workflow fails if retries are exhausted.
 - Gotify unavailable: notification retries without rerunning completed investigation steps.
-- NERV restarts: DBOS resumes incomplete workflows from PostgreSQL.
+- NERV restarts: DBOS resumes incomplete workflows from PostgreSQL; informer startup reconciliation re-evaluates current cluster state without multiplying stable workflow identities.

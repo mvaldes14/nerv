@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mvaldes14/nerv/internal/investigation"
@@ -76,6 +78,15 @@ CREATE TABLE IF NOT EXISTS nerv.findings (
     created_at timestamptz NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS nerv.incident_correlations (
+    correlation_key text PRIMARY KEY,
+    incident_id text NOT NULL,
+    active boolean NOT NULL DEFAULT true,
+    cooldown_seconds bigint NOT NULL DEFAULT 0,
+    cooldown_until timestamptz,
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS nerv.notification_attempts (
     incident_id text NOT NULL REFERENCES nerv.incidents(id) ON DELETE CASCADE,
     sink text NOT NULL,
@@ -86,10 +97,68 @@ CREATE TABLE IF NOT EXISTS nerv.notification_attempts (
 );
 
 CREATE INDEX IF NOT EXISTS incidents_status_updated_idx ON nerv.incidents(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS incident_correlations_incident_idx ON nerv.incident_correlations(incident_id);
 CREATE INDEX IF NOT EXISTS notification_attempts_incident_idx ON nerv.notification_attempts(incident_id, attempted_at DESC);
 `
 	if _, err := p.pool.Exec(ctx, migration); err != nil {
 		return fmt.Errorf("migrate NERV schema: %w", err)
+	}
+	return nil
+}
+
+func (p *Postgres) ResolveIncident(ctx context.Context, correlationKey string, cooldown time.Duration) (string, error) {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("begin incident correlation transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, correlationKey); err != nil {
+		return "", fmt.Errorf("lock incident correlation: %w", err)
+	}
+
+	var incidentID string
+	var reuse bool
+	err = tx.QueryRow(ctx, `
+SELECT incident_id, active OR COALESCE(cooldown_until > now(), false)
+FROM nerv.incident_correlations
+WHERE correlation_key = $1`, correlationKey).Scan(&incidentID, &reuse)
+	if err == nil && reuse {
+		if err := tx.Commit(ctx); err != nil {
+			return "", fmt.Errorf("commit incident correlation: %w", err)
+		}
+		return incidentID, nil
+	}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return "", fmt.Errorf("read incident correlation: %w", err)
+	}
+
+	incidentID = uuid.NewString()
+	cooldownSeconds := max(int64(cooldown/time.Second), 0)
+	_, err = tx.Exec(ctx, `
+INSERT INTO nerv.incident_correlations (correlation_key, incident_id, active, cooldown_seconds, cooldown_until, updated_at)
+VALUES ($1, $2, true, $3, NULL, now())
+ON CONFLICT (correlation_key) DO UPDATE SET
+    incident_id = EXCLUDED.incident_id,
+    active = true,
+    cooldown_seconds = EXCLUDED.cooldown_seconds,
+    cooldown_until = NULL,
+    updated_at = now()`, correlationKey, incidentID, cooldownSeconds)
+	if err != nil {
+		return "", fmt.Errorf("save incident correlation: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", fmt.Errorf("commit incident correlation: %w", err)
+	}
+	return incidentID, nil
+}
+
+func (p *Postgres) ReleaseIncident(ctx context.Context, correlationKey, incidentID string) error {
+	_, err := p.pool.Exec(ctx, `
+DELETE FROM nerv.incident_correlations c
+WHERE c.correlation_key = $1 AND c.incident_id = $2
+  AND NOT EXISTS (SELECT 1 FROM nerv.incidents i WHERE i.id = c.incident_id)`, correlationKey, incidentID)
+	if err != nil {
+		return fmt.Errorf("release incident correlation: %w", err)
 	}
 	return nil
 }
@@ -173,6 +242,17 @@ func (p *Postgres) SetStatus(ctx context.Context, incidentID, status string) err
 	}
 	if result.RowsAffected() == 0 {
 		return fmt.Errorf("incident %q not found", incidentID)
+	}
+	if status == "completed" {
+		_, err = p.pool.Exec(ctx, `
+UPDATE nerv.incident_correlations
+SET active = false,
+    cooldown_until = now() + cooldown_seconds * interval '1 second',
+    updated_at = now()
+WHERE incident_id = $1`, incidentID)
+		if err != nil {
+			return fmt.Errorf("complete incident correlation: %w", err)
+		}
 	}
 	return nil
 }

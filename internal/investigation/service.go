@@ -2,8 +2,6 @@ package investigation
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -89,6 +87,8 @@ type Store interface {
 	SaveFinding(ctx context.Context, finding Finding) error
 	SetStatus(ctx context.Context, incidentID, status string) error
 	GetFinding(ctx context.Context, incidentID string) (Finding, string, error)
+	ResolveIncident(ctx context.Context, correlationKey string, cooldown time.Duration) (string, error)
+	ReleaseIncident(ctx context.Context, correlationKey, incidentID string) error
 }
 
 type Notifier interface {
@@ -96,25 +96,27 @@ type Notifier interface {
 }
 
 type Dependencies struct {
-	DBOS          dbos.Context
-	LLM           LLM
-	Collector     Collector
-	Decision      DecisionEngine
-	Store         Store
-	Notifier      Notifier
-	AgentProvider string
-	AgentModel    string
+	DBOS             dbos.Context
+	LLM              LLM
+	Collector        Collector
+	Decision         DecisionEngine
+	Store            Store
+	Notifier         Notifier
+	AgentProvider    string
+	AgentModel       string
+	IncidentCooldown time.Duration
 }
 
 type Service struct {
-	dbos          dbos.Context
-	llm           LLM
-	collector     Collector
-	decision      DecisionEngine
-	store         Store
-	notifier      Notifier
-	agentProvider string
-	agentModel    string
+	dbos             dbos.Context
+	llm              LLM
+	collector        Collector
+	decision         DecisionEngine
+	store            Store
+	notifier         Notifier
+	agentProvider    string
+	agentModel       string
+	incidentCooldown time.Duration
 }
 
 func NewService(deps Dependencies) (*Service, error) {
@@ -134,14 +136,15 @@ func NewService(deps Dependencies) (*Service, error) {
 		notifier = noopNotifier{}
 	}
 	s := &Service{
-		dbos:          deps.DBOS,
-		llm:           deps.LLM,
-		collector:     deps.Collector,
-		decision:      decision,
-		store:         deps.Store,
-		notifier:      notifier,
-		agentProvider: deps.AgentProvider,
-		agentModel:    deps.AgentModel,
+		dbos:             deps.DBOS,
+		llm:              deps.LLM,
+		collector:        deps.Collector,
+		decision:         decision,
+		store:            deps.Store,
+		notifier:         notifier,
+		agentProvider:    deps.AgentProvider,
+		agentModel:       deps.AgentModel,
+		incidentCooldown: deps.IncidentCooldown,
 	}
 	dbos.RegisterWorkflow(deps.DBOS, s.Investigate,
 		dbos.WithInstance(s),
@@ -159,6 +162,17 @@ func (s *Service) Accept(ctx context.Context, req Request) (Accepted, error) {
 	if req.Question == "" {
 		return Accepted{}, fmt.Errorf("question is required")
 	}
+	if req.ID == "" {
+		if req.IdempotencyKey == "" {
+			req.ID = uuid.NewString()
+		} else {
+			incidentID, err := s.store.ResolveIncident(ctx, req.IdempotencyKey, s.incidentCooldown)
+			if err != nil {
+				return Accepted{}, fmt.Errorf("resolve correlated incident: %w", err)
+			}
+			req.ID = incidentID
+		}
+	}
 	workflowID := workflowID(req)
 	handle, err := dbos.RunWorkflow(s.dbos, s.Investigate, req,
 		dbos.WithRunInstance(s),
@@ -169,6 +183,9 @@ func (s *Service) Accept(ctx context.Context, req Request) (Accepted, error) {
 		}),
 	)
 	if err != nil {
+		if req.IdempotencyKey != "" {
+			_ = s.store.ReleaseIncident(ctx, req.IdempotencyKey, req.ID)
+		}
 		return Accepted{}, fmt.Errorf("start investigation workflow: %w", err)
 	}
 	return Accepted{ID: req.ID, WorkflowID: handle.GetWorkflowID(), Status: "accepted"}, nil
@@ -317,13 +334,6 @@ func normalizeRequest(req Request) Request {
 	if req.Source == "" {
 		req.Source = "unknown"
 	}
-	if req.ID == "" {
-		if req.IdempotencyKey != "" {
-			req.ID = stableID(req.Source, req.IdempotencyKey)
-		} else {
-			req.ID = uuid.NewString()
-		}
-	}
 	return req
 }
 
@@ -341,7 +351,19 @@ func triggerSummary(req Request) string {
 	return strings.Join(parts, "; ")
 }
 
-func stableID(source, value string) string {
-	h := sha256.Sum256([]byte(source + "\x00" + value))
-	return hex.EncodeToString(h[:16])
+// CorrelationKey gives watcher and external intake one identity when target and
+// deterministic failure class match.
+func CorrelationKey(target *Target, failure string) string {
+	if target == nil {
+		return ""
+	}
+	kind := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(target.Kind)), "s")
+	return strings.Join([]string{
+		"k8s",
+		strings.ToLower(strings.TrimSpace(target.Namespace)),
+		kind,
+		strings.ToLower(strings.TrimSpace(target.Name)),
+		strings.ToLower(strings.TrimSpace(target.Container)),
+		strings.ToLower(strings.TrimSpace(failure)),
+	}, ":")
 }

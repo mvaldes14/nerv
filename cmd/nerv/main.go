@@ -18,6 +18,7 @@ import (
 	"github.com/mvaldes14/nerv/internal/api"
 	"github.com/mvaldes14/nerv/internal/config"
 	"github.com/mvaldes14/nerv/internal/decision"
+	"github.com/mvaldes14/nerv/internal/detection"
 	"github.com/mvaldes14/nerv/internal/investigation"
 	k8stools "github.com/mvaldes14/nerv/internal/kubernetes"
 	"github.com/mvaldes14/nerv/internal/llm"
@@ -58,7 +59,7 @@ func run(args []string) error {
 	}
 	defer shutdownTelemetry(context.Background())
 
-	svc, cleanup, err := buildService(ctx, cfg, logger)
+	svc, kubeClient, cleanup, err := buildService(ctx, cfg, logger)
 	if err != nil {
 		return err
 	}
@@ -68,24 +69,24 @@ func run(args []string) error {
 	case "ask":
 		return runAsk(args[2:], svc)
 	case "serve":
-		return runServe(ctx, args[2:], cfg, svc, logger)
+		return runServe(ctx, args[2:], cfg, svc, kubeClient, logger)
 	default:
 		usage()
 		return fmt.Errorf("unknown command %q", args[1])
 	}
 }
 
-func buildService(ctx context.Context, cfg config.Config, logger *slog.Logger) (*investigation.Service, func(), error) {
+func buildService(ctx context.Context, cfg config.Config, logger *slog.Logger) (*investigation.Service, *k8stools.Client, func(), error) {
 	postgres, err := store.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	cleanup := func() { postgres.Close() }
 
 	dbosCtx, err := dbos.NewContext(ctx, dbos.Config{DatabaseURL: cfg.DatabaseURL, AppName: "nerv"})
 	if err != nil {
 		cleanup()
-		return nil, nil, fmt.Errorf("create DBOS context: %w", err)
+		return nil, nil, nil, fmt.Errorf("create DBOS context: %w", err)
 	}
 
 	var provider investigation.LLM
@@ -114,24 +115,25 @@ func buildService(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	}
 
 	svc, err := investigation.NewService(investigation.Dependencies{
-		DBOS:          dbosCtx,
-		LLM:           provider,
-		Collector:     collector,
-		Decision:      decisionEngine,
-		Store:         postgres,
-		Notifier:      notifier,
-		AgentProvider: cfg.LLMProvider,
-		AgentModel:    cfg.LLMModel,
+		DBOS:             dbosCtx,
+		LLM:              provider,
+		Collector:        collector,
+		Decision:         decisionEngine,
+		Store:            postgres,
+		Notifier:         notifier,
+		AgentProvider:    cfg.LLMProvider,
+		AgentModel:       cfg.LLMModel,
+		IncidentCooldown: cfg.DetectionCooldown,
 	})
 	if err != nil {
 		cleanup()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if err := dbos.Launch(dbosCtx); err != nil {
 		cleanup()
-		return nil, nil, fmt.Errorf("launch DBOS: %w", err)
+		return nil, nil, nil, fmt.Errorf("launch DBOS: %w", err)
 	}
-	return svc, func() {
+	return svc, kubeClient, func() {
 		dbos.Shutdown(dbosCtx, 10*time.Second)
 		postgres.Close()
 	}, nil
@@ -168,12 +170,47 @@ func runAsk(args []string, svc *investigation.Service) error {
 	return enc.Encode(finding)
 }
 
-func runServe(ctx context.Context, args []string, cfg config.Config, svc *investigation.Service, logger *slog.Logger) error {
+func runServe(ctx context.Context, args []string, cfg config.Config, svc *investigation.Service, kubeClient *k8stools.Client, logger *slog.Logger) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	addr := fs.String("addr", cfg.Addr, "listen address")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	detectorCtx, stopDetector := context.WithCancel(ctx)
+	var detectorDone chan struct{}
+	defer func() {
+		stopDetector()
+		if detectorDone != nil {
+			<-detectorDone
+		}
+	}()
+	if cfg.DetectionEnabled {
+		if kubeClient == nil {
+			logger.Warn("autonomous Kubernetes detection disabled because Kubernetes client is unavailable")
+		} else {
+			detector, err := detection.New(kubeClient.Clientset(), svc, detection.Config{
+				Persistence:           cfg.DetectionPersistence,
+				Cooldown:              cfg.DetectionCooldown,
+				Resync:                cfg.DetectionResync,
+				Workers:               cfg.DetectionWorkers,
+				QueueCapacity:         cfg.DetectionQueueCapacity,
+				RestartThreshold:      int32(cfg.DetectionRestartThreshold),
+				MaintenanceAnnotation: cfg.DetectionMaintenanceAnnotation,
+				AcceptTimeout:         cfg.HTTPTimeout,
+			}, logger)
+			if err != nil {
+				return fmt.Errorf("configure autonomous Kubernetes detection: %w", err)
+			}
+			detectorDone = make(chan struct{})
+			go func() {
+				defer close(detectorDone)
+				if err := detector.Run(detectorCtx); err != nil {
+					logger.Error("autonomous Kubernetes detection stopped", "error", err)
+				}
+			}()
+		}
 	}
 
 	handler := api.NewHandler(api.Dependencies{Service: svc, AuthToken: cfg.AuthToken, Logger: logger})

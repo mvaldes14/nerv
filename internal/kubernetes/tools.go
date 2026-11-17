@@ -50,6 +50,8 @@ func New(kubeconfig string) (*Client, error) {
 
 func NewWithClient(client kubernetes.Interface) *Client { return &Client{client: client} }
 
+func (c *Client) Clientset() kubernetes.Interface { return c.client }
+
 func (c *Client) Collect(ctx context.Context, req investigation.Request) ([]investigation.Evidence, error) {
 	if req.Target == nil || req.Target.Name == "" {
 		return nil, nil
