@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NERV Operator</title>
+  <link rel="icon" href="nerv-mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <div class="brand"><img src="nerv-mark.svg" alt=""><div><strong>NERV</strong><span>Private operator console</span></div></div>
+    <form id="auth-form" class="auth-form">
+      <label for="token">Bearer token</label>
+      <input id="token" name="token" type="password" autocomplete="off" placeholder="Stored for this tab only">
+      <button type="submit">Connect</button>
+      <button id="forget-token" type="button" class="secondary">Forget</button>
+    </form>
+  </header>
+
+  <main>
+    <section class="ask card">
+      <div class="section-heading"><div><p class="eyebrow">Operator question</p><h1>Ask NERV</h1></div><span id="connection" class="pill muted">Token required</span></div>
+      <form id="ask-form">
+        <label for="question">Question</label>
+        <textarea id="question" name="question" rows="3" required placeholder="Why is checkout-api restarting?"></textarea>
+        <div class="target-grid">
+          <label>Namespace<input name="namespace" placeholder="apps"></label>
+          <label>Kind<input name="kind" placeholder="pod"></label>
+          <label>Workload<input name="name" placeholder="checkout-api-abc"></label>
+          <label>Container<input name="container" placeholder="checkout"></label>
+        </div>
+        <div class="form-actions"><button type="submit">Investigate</button><span id="ask-status" role="status"></span></div>
+      </form>
+    </section>
+
+    <section class="workspace">
+      <aside class="card history">
+        <div class="section-heading"><div><p class="eyebrow">Unified intake</p><h2>Incident history</h2></div><button id="refresh" type="button" class="secondary">Refresh</button></div>
+        <form id="filters" class="filters">
+          <input name="source" aria-label="Source filter" placeholder="Source">
+          <input name="status" aria-label="Status filter" placeholder="Status">
+          <input name="namespace" aria-label="Namespace filter" placeholder="Namespace">
+          <input name="workload" aria-label="Workload filter" placeholder="Workload">
+          <button type="submit" class="secondary">Filter</button>
+        </form>
+        <div id="list-status" class="status-line" role="status"></div>
+        <div id="incident-list" class="incident-list"></div>
+        <div class="pager"><button id="previous" type="button" class="secondary">Previous</button><span id="page-label"></span><button id="next" type="button" class="secondary">Next</button></div>
+      </aside>
+
+      <article id="detail" class="card detail">
+        <div class="empty-state"><p class="eyebrow">Investigation detail</p><h2>Select an incident</h2><p>Evidence, model findings, uncertainty, decision source, and notification state appear here.</p></div>
+      </article>
+    </section>
+  </main>
+  <script src="app.js" defer></script>
+</body>
+</html>

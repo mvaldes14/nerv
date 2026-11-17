@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,15 +18,23 @@ import (
 	"github.com/mvaldes14/nerv/internal/investigation"
 )
 
+type investigationService interface {
+	Ready(context.Context) error
+	Ask(context.Context, investigation.Request) (investigation.Finding, error)
+	Accept(context.Context, investigation.Request) (investigation.Accepted, error)
+	Get(context.Context, string) (investigation.Investigation, error)
+	List(context.Context, investigation.IncidentFilter) (investigation.IncidentPage, error)
+}
+
 type Dependencies struct {
-	Service   *investigation.Service
+	Service   investigationService
 	AuthToken string
 	Logger    *slog.Logger
 }
 
 type Handler struct {
 	mux       *http.ServeMux
-	service   *investigation.Service
+	service   investigationService
 	authToken string
 	logger    *slog.Logger
 }
@@ -45,8 +54,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) { h.mux.Serv
 func (h *Handler) routes() {
 	h.mux.HandleFunc("GET /healthz", h.health)
 	h.mux.HandleFunc("GET /readyz", h.ready)
+	h.mux.HandleFunc("GET /ui", h.redirectUI)
+	h.mux.Handle("GET /ui/", h.uiHandler())
 	h.mux.Handle("POST /ask", h.requireAuth(http.HandlerFunc(h.ask)))
 	h.mux.Handle("POST /alert", h.requireAuth(http.HandlerFunc(h.alert)))
+	h.mux.Handle("GET /investigations", h.requireAuth(http.HandlerFunc(h.listInvestigations)))
 	h.mux.Handle("GET /investigations/{id}", h.requireAuth(http.HandlerFunc(h.getInvestigation)))
 }
 
@@ -113,13 +125,58 @@ func (h *Handler) alert(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "accepted", "receiver": payload.Receiver, "investigations": accepted})
 }
 
+func (h *Handler) listInvestigations(w http.ResponseWriter, r *http.Request) {
+	limit, err := queryInt(r, "limit")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	offset, err := queryInt(r, "offset")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	page, err := h.service.List(r.Context(), investigation.IncidentFilter{
+		Limit:     limit,
+		Offset:    offset,
+		Source:    r.URL.Query().Get("source"),
+		Status:    r.URL.Query().Get("status"),
+		Namespace: r.URL.Query().Get("namespace"),
+		Workload:  r.URL.Query().Get("workload"),
+	})
+	if err != nil {
+		h.logger.Warn("list investigations failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to list investigations")
+		return
+	}
+	writeJSON(w, http.StatusOK, page)
+}
+
 func (h *Handler) getInvestigation(w http.ResponseWriter, r *http.Request) {
-	finding, status, err := h.service.Get(r.Context(), r.PathValue("id"))
+	detail, err := h.service.Get(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": status, "finding": finding})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"incident":      detail.Incident,
+		"status":        detail.Incident.Status,
+		"finding":       detail.Finding,
+		"evidence":      detail.Evidence,
+		"notifications": detail.Notifications,
+	})
+}
+
+func queryInt(r *http.Request, name string) (int, error) {
+	value := strings.TrimSpace(r.URL.Query().Get(name))
+	if value == "" {
+		return 0, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer", name)
+	}
+	return parsed, nil
 }
 
 func (h *Handler) requireAuth(next http.Handler) http.Handler {

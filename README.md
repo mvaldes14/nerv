@@ -17,6 +17,7 @@ NERV starts the same investigation workflow from two inputs:
 - `POST /ask` for operator questions
 - `POST /alert` for Alertmanager-compatible webhooks
 - client-go informers for sustained Pod and workload failures
+- the embedded private operator UI at `/ui/`
 
 The workflow collects resource state, events, logs, previous logs, and owner references. Decision Gateway chooses whether to suppress, investigate, research, or escalate. Agentgateway handles the LLM request. NERV persists the result and sends a Gotify notification.
 
@@ -71,7 +72,9 @@ task db:up
 task run:serve
 ```
 
-Ask about a pod:
+Open `http://127.0.0.1:8080/ui/`, enter the `NERV_AUTH_TOKEN`, then browse incidents or submit a question. The UI keeps the token in browser `sessionStorage` only and calls NERV HTTP APIs; it never connects directly to PostgreSQL, Kubernetes, SigNoz, or ClickHouse.
+
+Ask about a pod from the CLI:
 
 ```bash
 go run ./cmd/nerv ask \
@@ -91,7 +94,9 @@ The local environment uses the echo provider unless you configure cluster AI ser
 | `GET /readyz` | PostgreSQL readiness |
 | `POST /ask` | Run an investigation and return the finding |
 | `POST /alert` | Durably accept alerts and return workflow IDs |
-| `GET /investigations/{id}` | Return incident status and finding |
+| `GET /investigations` | List incident history with bounded pagination and filters |
+| `GET /investigations/{id}` | Return incident metadata, status, finding, evidence, and notifications |
+| `GET /ui/` | Embedded operator UI shell (API calls still require bearer authentication) |
 
 Request examples and response fields: [docs/api.md](docs/api.md).
 
@@ -147,7 +152,8 @@ docs/                 architecture, API, and testing notes
 - Logs and serialized evidence have size limits.
 - Logs, events, status messages, and annotations are treated as untrusted input.
 - GenAI telemetry records operation metadata and token usage, not prompts, evidence, model output, or tool payloads.
-- API routes require bearer authentication when `NERV_AUTH_TOKEN` is set.
+- API routes require bearer authentication when `NERV_AUTH_TOKEN` is set. Configure it for every private or shared deployment.
+- Operator UI stores bearer token in per-tab `sessionStorage`; token is never embedded in served HTML or JavaScript.
 - NERV has no public ingress in the base manifests.
 - Remediation is deferred until investigation quality and approval controls are tested.
 

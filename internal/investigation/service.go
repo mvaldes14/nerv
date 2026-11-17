@@ -56,6 +56,7 @@ type Finding struct {
 	Answer      string     `json:"answer"`
 	Evidence    []Evidence `json:"evidence"`
 	Decision    Decision   `json:"decision"`
+	Confidence  string     `json:"confidence"`
 	Uncertainty []string   `json:"uncertainty,omitempty"`
 	Provider    string     `json:"provider"`
 	Model       string     `json:"model"`
@@ -67,6 +68,56 @@ type Accepted struct {
 	WorkflowID string `json:"workflow_id"`
 	Status     string `json:"status"`
 }
+
+type IncidentFilter struct {
+	Limit     int
+	Offset    int
+	Source    string
+	Status    string
+	Namespace string
+	Workload  string
+}
+
+type IncidentSummary struct {
+	ID          string            `json:"id"`
+	WorkflowID  string            `json:"workflow_id"`
+	Source      string            `json:"source"`
+	Question    string            `json:"question"`
+	Status      string            `json:"status"`
+	Target      *Target           `json:"target,omitempty"`
+	Labels      map[string]string `json:"labels,omitempty"`
+	Annotations map[string]string `json:"annotations,omitempty"`
+	CreatedAt   time.Time         `json:"created_at"`
+	UpdatedAt   time.Time         `json:"updated_at"`
+}
+
+type IncidentPage struct {
+	Items   []IncidentSummary `json:"items"`
+	Limit   int               `json:"limit"`
+	Offset  int               `json:"offset"`
+	HasMore bool              `json:"has_more"`
+}
+
+type NotificationAttempt struct {
+	Sink        string    `json:"sink"`
+	ExternalID  string    `json:"external_id,omitempty"`
+	Status      string    `json:"status"`
+	Error       string    `json:"error,omitempty"`
+	AttemptedAt time.Time `json:"attempted_at"`
+}
+
+type Investigation struct {
+	Incident      IncidentSummary       `json:"incident"`
+	Finding       *Finding              `json:"finding,omitempty"`
+	Evidence      []Evidence            `json:"evidence"`
+	Notifications []NotificationAttempt `json:"notifications"`
+}
+
+const (
+	DefaultIncidentLimit = 50
+	MaxIncidentLimit     = 100
+	MaxIncidentOffset    = 10000
+)
 
 type LLM interface {
 	Generate(ctx context.Context, prompt string, evidence []Evidence) (answer string, provider string, model string, err error)
@@ -86,7 +137,8 @@ type Store interface {
 	SaveEvidence(ctx context.Context, incidentID string, evidence []Evidence) error
 	SaveFinding(ctx context.Context, finding Finding) error
 	SetStatus(ctx context.Context, incidentID, status string) error
-	GetFinding(ctx context.Context, incidentID string) (Finding, string, error)
+	GetInvestigation(ctx context.Context, incidentID string) (Investigation, error)
+	ListIncidents(ctx context.Context, filter IncidentFilter) (IncidentPage, error)
 	ResolveIncident(ctx context.Context, correlationKey string, cooldown time.Duration) (string, error)
 	ReleaseIncident(ctx context.Context, correlationKey, incidentID string) error
 }
@@ -212,8 +264,26 @@ func (s *Service) Ask(ctx context.Context, req Request) (Finding, error) {
 	return finding, nil
 }
 
-func (s *Service) Get(ctx context.Context, id string) (Finding, string, error) {
-	return s.store.GetFinding(ctx, id)
+func (s *Service) Get(ctx context.Context, id string) (Investigation, error) {
+	return s.store.GetInvestigation(ctx, id)
+}
+
+func (s *Service) List(ctx context.Context, filter IncidentFilter) (IncidentPage, error) {
+	filter.Source = strings.TrimSpace(filter.Source)
+	filter.Status = strings.TrimSpace(filter.Status)
+	filter.Namespace = strings.TrimSpace(filter.Namespace)
+	filter.Workload = strings.TrimSpace(filter.Workload)
+	if filter.Limit <= 0 {
+		filter.Limit = DefaultIncidentLimit
+	} else if filter.Limit > MaxIncidentLimit {
+		filter.Limit = MaxIncidentLimit
+	}
+	if filter.Offset < 0 {
+		filter.Offset = 0
+	} else if filter.Offset > MaxIncidentOffset {
+		filter.Offset = MaxIncidentOffset
+	}
+	return s.store.ListIncidents(ctx, filter)
 }
 
 func (s *Service) Ready(ctx context.Context) error {
@@ -281,6 +351,7 @@ func (s *Service) Investigate(ctx dbos.Context, req Request) (finding Finding, w
 			Answer:     generation.Answer,
 			Evidence:   evidence,
 			Decision:   decision,
+			Confidence: "unknown",
 			Provider:   generation.Provider,
 			Model:      generation.Model,
 			CreatedAt:  time.Now().UTC(),
@@ -321,7 +392,7 @@ func (s *Service) Investigate(ctx dbos.Context, req Request) (finding Finding, w
 type defaultDecisionEngine struct{}
 
 func (defaultDecisionEngine) Evaluate(context.Context, Request, []Evidence) (Decision, error) {
-	return Decision{Action: "investigate", Reason: "default NERV policy"}, nil
+	return Decision{Action: "investigate", Reason: "default NERV policy", Provider: "nerv.local"}, nil
 }
 
 type noopNotifier struct{}
