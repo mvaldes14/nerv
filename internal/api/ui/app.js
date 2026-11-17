@@ -170,11 +170,14 @@
     const grid = document.createElement('div');
     grid.className = 'decision-grid';
     grid.append(
-      fact('Recommended action', finding?.decision?.action || 'Pending'),
+      fact('Decision action', finding?.decision?.action || 'Pending'),
       fact('Decision provider', finding?.decision?.provider || 'Local NERV policy'),
       fact('Decision reason', finding?.decision?.reason || 'Not recorded'),
       fact('Decision request ID', finding?.decision?.request_id || 'Not provided'),
       fact('Confidence', finding?.confidence || 'Unknown / not asserted'),
+      fact('Recommended action', finding?.recommended_action || 'Not recorded'),
+      fact('Executed tools', finding?.tools_used?.length ? finding.tools_used.join(', ') : 'None recorded'),
+      fact('Budget stop reason', finding?.budget?.stop_reason || 'Completed within budget'),
       fact('Review required', finding?.decision?.review_required ? 'Yes' : 'No')
     );
     decision.append(grid);
@@ -186,7 +189,13 @@
     if (!suppressed) {
       const modelMeta = document.createElement('div');
       modelMeta.className = 'detail-meta';
-      modelMeta.append(text('span', `Provider: ${finding?.provider || 'not recorded'}`), text('span', `Model: ${finding?.model || 'not recorded'}`));
+      modelMeta.append(
+        text('span', `Provider: ${finding?.provider || 'not recorded'}`),
+        text('span', `Model: ${finding?.model || 'not recorded'}`),
+        text('span', `Rounds: ${finding?.budget?.rounds_used ?? 'not recorded'}/${finding?.budget?.max_rounds ?? 'not recorded'}`),
+        text('span', `Tool calls: ${finding?.budget?.tool_calls_used ?? 'not recorded'}/${finding?.budget?.max_tool_calls ?? 'not recorded'}`),
+        text('span', `Tokens: ${finding?.budget?.total_tokens ?? 'not recorded'}/${finding?.budget?.max_tokens ?? 'not recorded'}`)
+      );
       outcome.append(modelMeta);
       const uncertainty = finding?.uncertainty?.length ? finding.uncertainty.join(' • ') : 'No structured uncertainty recorded; confidence remains unknown.';
       outcome.append(fact('Uncertainty', uncertainty));

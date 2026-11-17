@@ -29,7 +29,7 @@ Checks PostgreSQL with a two-second timeout. It returns `503` when PostgreSQL ca
 
 ### `POST /ask`
 
-Starts an investigation and waits for the finding. The HTTP request has a 60-second timeout.
+Starts an investigation and waits for finding. Server wait timeout is agent budget plus 15 seconds (90 seconds with defaults).
 
 ```json
 {
@@ -44,7 +44,7 @@ Starts an investigation and waits for the finding. The HTTP request has a 60-sec
 }
 ```
 
-Only `question` is required. Without a target, NERV cannot collect Kubernetes evidence. `/ask` represents explicit operator intent, so it bypasses Decision Gateway and receives a local `investigate` decision with provider `nerv.local` and no external request ID. The CLI `ask` command uses the same decision path.
+Only `question` is required; it is limited to 4,000 characters, and target fields are limited to 253 characters. Without a target, bounded agent loop can discover relevant workloads with approved all-namespace or namespace-scoped list tools. `/ask` represents explicit operator intent, so it bypasses Decision Gateway and receives local `investigate` decision with provider `nerv.local` and no external request ID. CLI `ask` command uses same decision path.
 
 ```bash
 curl -sS http://127.0.0.1:8080/ask \
@@ -72,6 +72,19 @@ Example response:
     "action": "investigate",
     "reason": "explicit operator investigation request",
     "provider": "nerv.local"
+  },
+  "confidence": "high",
+  "uncertainty": [],
+  "recommended_action": "Continue monitoring Vault readiness.",
+  "tools_used": ["list_workloads", "describe_resource"],
+  "budget": {
+    "max_rounds": 4,
+    "rounds_used": 3,
+    "max_tool_calls": 6,
+    "tool_calls_used": 2,
+    "max_tokens": 12000,
+    "total_tokens": 1840,
+    "cost_accounting": "unknown_disabled"
   },
   "provider": "agentgateway",
   "model": "openai/gpt-5-mini",
@@ -187,7 +200,7 @@ curl -sS http://127.0.0.1:8080/investigations/<incident-id> \
 }
 ```
 
-Evidence/tool output is returned separately from the finding. `confidence` defaults to `unknown` because NERV does not infer confidence when the model or policy has not supplied one. Decision metadata remains backward-compatible under `finding.decision`: `action`, `reason`, `review_required`, `provider`, and `request_id` are present when available.
+Evidence/tool output is returned separately from finding and is explicitly executed evidence, not suggested follow-up. `confidence`, `uncertainty`, `recommended_action`, `tools_used`, and `budget` expose structured result and accounting. `budget.stop_reason` is present when loop ends on a limit. Cost accounting is `unknown_disabled` unless both configured prices are available. Decision metadata remains backward-compatible under `finding.decision`: `action`, `reason`, `review_required`, `provider`, and `request_id` are present when available.
 
 For `suppress`, NERV does not call Agentgateway. It persists a human-readable policy outcome with the reason and available provider/request metadata, and the UI labels it **Policy outcome** rather than model-generated output. A remote `duplicate` classification does not prove that another incident exists. Only PostgreSQL/DBOS correlation can reuse an incident, and NERV never fabricates an incident link from decision metadata.
 

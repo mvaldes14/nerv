@@ -48,7 +48,10 @@ func run(args []string) error {
 		return nil
 	}
 
-	cfg := config.Load()
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load configuration: %w", err)
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -93,15 +96,20 @@ func buildService(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	if cfg.LLMProvider == "echo" {
 		provider = llm.NewEchoProvider("echo", cfg.LLMModel)
 	} else {
-		provider = llm.NewOpenAICompatible(cfg.AgentgatewayURL, cfg.AgentgatewayToken, cfg.LLMProvider, cfg.LLMModel, cfg.HTTPTimeout)
+		client := llm.NewOpenAICompatible(cfg.AgentgatewayURL, cfg.AgentgatewayToken, cfg.LLMProvider, cfg.LLMModel, cfg.AgentModelTimeout)
+		client.SetFallbackModel(cfg.LLMFallbackModel)
+		provider = client
 	}
 
 	var collector investigation.Collector
+	var toolExecutor investigation.ToolExecutor
 	kubeClient, err := k8stools.New(cfg.Kubeconfig)
 	if err != nil {
 		logger.Warn("Kubernetes tools disabled", "error", err)
 	} else {
+		kubeClient.ConfigureAgentTools(cfg.AgentMaxToolOutputBytes, 1000)
 		collector = kubeClient
+		toolExecutor = kubeClient
 	}
 
 	var remoteDecisionEngine investigation.DecisionEngine
@@ -116,9 +124,23 @@ func buildService(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	}
 
 	svc, err := investigation.NewService(investigation.Dependencies{
-		DBOS:             dbosCtx,
-		LLM:              provider,
-		Collector:        collector,
+		DBOS:      dbosCtx,
+		LLM:       provider,
+		Collector: collector,
+		Tools:     toolExecutor,
+		AgentBudget: investigation.AgentBudget{
+			MaxRounds:        cfg.AgentMaxRounds,
+			MaxToolCalls:     cfg.AgentMaxToolCalls,
+			Timeout:          cfg.AgentTimeout,
+			MaxTokens:        cfg.AgentMaxTokens,
+			ToolConcurrency:  cfg.AgentToolConcurrency,
+			ModelTimeout:     cfg.AgentModelTimeout,
+			ToolTimeout:      cfg.AgentToolTimeout,
+			MaxEvidenceBytes: cfg.AgentMaxEvidenceBytes,
+			MaxCostUSD:       cfg.AgentMaxCostUSD,
+			InputPricePerM:   cfg.AgentInputPricePerMTokens,
+			OutputPricePerM:  cfg.AgentOutputPricePerMTokens,
+		},
 		Decision:         decisionEngine,
 		Store:            postgres,
 		Notifier:         notifier,
@@ -143,7 +165,7 @@ func buildService(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 func runAsk(args []string, svc *investigation.Service) error {
 	fs := flag.NewFlagSet("ask", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	timeout := fs.Duration("timeout", 60*time.Second, "investigation timeout")
+	timeout := fs.Duration("timeout", 90*time.Second, "investigation timeout")
 	namespace := fs.String("namespace", "", "Kubernetes namespace")
 	kind := fs.String("kind", "", "Kubernetes resource kind")
 	name := fs.String("name", "", "Kubernetes resource name")
@@ -216,7 +238,7 @@ func runServe(ctx context.Context, args []string, cfg config.Config, svc *invest
 		}
 	}
 
-	handler := api.NewHandler(api.Dependencies{Service: svc, AuthToken: cfg.AuthToken, Logger: logger})
+	handler := api.NewHandler(api.Dependencies{Service: svc, AuthToken: cfg.AuthToken, AskTimeout: cfg.AgentTimeout + 15*time.Second, Logger: logger})
 	srv := &http.Server{Addr: *addr, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	errCh := make(chan error, 1)
 	go func() {
@@ -239,7 +261,7 @@ func runServe(ctx context.Context, args []string, cfg config.Config, svc *invest
 
 func usage() {
 	fmt.Fprintf(os.Stderr, `Usage:
-  nerv ask [--timeout 60s] [--namespace ns --kind pod --name pod] <question>
+  nerv ask [--timeout 90s] [--namespace ns --kind pod --name pod] <question>
   nerv serve [--addr 127.0.0.1:8080]
   nerv version
 `)
