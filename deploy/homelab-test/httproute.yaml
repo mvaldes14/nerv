@@ -10,7 +10,10 @@ spec:
   hostnames:
     - nerv.int.mvaldes.dev
   rules:
-    - matches:
+    - timeouts:
+        request: 90s
+        backendRequest: 90s
+      matches:
         - path:
             type: PathPrefix
             value: /
