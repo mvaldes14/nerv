@@ -75,6 +75,7 @@ func (s *Service) runAgentLoopWithSteps(workflowSpan context.Context, req Reques
 	seenCallIDs := map[string]bool{}
 	seenCalls := map[string]bool{}
 	lastProvider, lastModel := s.agentProvider, s.agentModel
+	lastInputTokens := 0
 
 	stop := func(reason string) Generation {
 		budget.StopReason = reason
@@ -113,7 +114,8 @@ func (s *Service) runAgentLoopWithSteps(workflowSpan context.Context, req Reques
 			return stop("time_limit"), nil
 		}
 		remainingTokens := limits.MaxTokens - budget.TotalTokens
-		if remainingTokens <= 0 {
+		maxOutputTokens := remainingTokens - lastInputTokens
+		if maxOutputTokens <= 0 {
 			return stop("token_limit"), nil
 		}
 		response, err := modelStep(agentCtx, round, callTimeout, AgentRequest{
@@ -121,7 +123,7 @@ func (s *Service) runAgentLoopWithSteps(workflowSpan context.Context, req Reques
 			Tools:           definitions,
 			ToolChoice:      "auto",
 			ResponseFormat:  finalResponseFormat(),
-			MaxOutputTokens: min(remainingTokens, 2048),
+			MaxOutputTokens: min(maxOutputTokens, 2048),
 		})
 		if err != nil {
 			return Generation{}, err
@@ -129,6 +131,7 @@ func (s *Service) runAgentLoopWithSteps(workflowSpan context.Context, req Reques
 		budget.RoundsUsed = round
 		budget.InputTokens += response.Usage.InputTokens
 		budget.OutputTokens += response.Usage.OutputTokens
+		lastInputTokens = response.Usage.InputTokens
 		budget.ModelAttempts += max(response.Attempts, 1)
 		budget.FallbackUsed = budget.FallbackUsed || response.FallbackUsed
 		lastProvider, lastModel = response.Provider, response.Model
