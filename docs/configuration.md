@@ -19,6 +19,7 @@ NERV reads configuration from environment variables. The Kubernetes manifests lo
 | `NERV_DECISION_VERSION` | `v1` | Decision contract version |
 | `NERV_GOTIFY_URL` | empty | Gotify base URL; empty disables delivery |
 | `NERV_GOTIFY_TOKEN` | empty | Gotify application token |
+| `NERV_NOTIFICATION_DEBOUNCE` | `2m` | Quiet period before one digest is sent for a burst of autonomous detector incidents |
 | `NERV_HTTP_TIMEOUT` | `30s` | General outbound HTTP timeout |
 | `NERV_AGENT_MAX_ROUNDS` | `4` | Maximum model rounds per investigation |
 | `NERV_AGENT_MAX_TOOL_CALLS` | `6` | Maximum requested tool calls; rejected calls consume budget |
@@ -54,6 +55,8 @@ Agent limits must be positive and within built-in safety caps. Startup fails on 
 A condition must remain continuously present for `NERV_DETECTION_PERSISTENCE`. Recovery before that threshold clears it. One active condition opens one workflow; repeated updates and relists are suppressed. Completed incident correlations remain in cooldown for `NERV_DETECTION_COOLDOWN` before they can resolve to a new incident. NERV and recognized external alerts use the same stable PostgreSQL correlation key, so overlapping intake returns the existing DBOS workflow even across watcher restarts.
 
 Repeated restart detection ignores historical restart counts unless the latest unexpected termination occurred inside `NERV_DETECTION_RESTART_WINDOW`. This prevents a rollout or old node disruption from opening incidents indefinitely.
+
+Autonomous detector findings keep separate incident records, but Gotify delivery uses a sliding `NERV_NOTIFICATION_DEBOUNCE` quiet period. Related findings arriving during that period extend the deadline and produce one cluster-level digest instead of one notification per workload. Operator questions and external alerts remain immediate.
 
 Set the configured maintenance annotation on a Pod or workload to suppress autonomous detection for that resource. Detection resumes after annotation removal and persistence threshold elapses. NERV only reads annotations; it never creates or changes them.
 

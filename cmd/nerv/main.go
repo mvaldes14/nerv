@@ -120,7 +120,7 @@ func buildService(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 
 	var notifier investigation.Notifier
 	if cfg.GotifyURL != "" || cfg.GotifyToken != "" {
-		notifier = notify.NewGotify(cfg.GotifyURL, cfg.GotifyToken, cfg.HTTPTimeout, postgres)
+		notifier = notify.NewGotify(cfg.GotifyURL, cfg.GotifyToken, cfg.HTTPTimeout, cfg.NotificationDebounce, postgres)
 	}
 
 	svc, err := investigation.NewService(investigation.Dependencies{

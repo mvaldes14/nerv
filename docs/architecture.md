@@ -105,12 +105,16 @@ DBOS creates its system tables in the `dbos` schema. NERV creates product tables
 - `nerv.findings`
 - `nerv.incident_correlations`
 - `nerv.notification_attempts`
+- `nerv.notification_batches`
+- `nerv.notification_batch_items`
 
 NERV runs its schema migration during startup. Readiness fails when PostgreSQL is unavailable.
 
 ## Notifications
 
-Gotify delivery is a DBOS step with bounded retries. NERV checks for a recorded successful delivery before sending again. A process failure after Gotify accepts a message but before PostgreSQL records it can still produce a duplicate. Gotify does not provide an idempotency key for this case.
+Gotify delivery is a DBOS step with bounded retries. Operator questions and external alerts notify immediately. Autonomous detector findings enter a PostgreSQL-backed sliding debounce batch; each new finding extends the quiet-period deadline, then the leader workflow sends one digest covering every incident in the batch. Individual investigations and per-incident delivery records remain available.
+
+NERV checks for a recorded successful delivery before sending again. A process failure after Gotify accepts a message but before PostgreSQL records it can still produce a duplicate. Gotify does not provide an idempotency key for this case.
 
 ## Security boundary
 

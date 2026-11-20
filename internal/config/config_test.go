@@ -11,6 +11,9 @@ func TestLoadAgentDefaultsAndFallbackDisabled(t *testing.T) {
 	if cfg.AgentMaxRounds != 4 || cfg.AgentMaxToolCalls != 6 || cfg.AgentMaxTokens != 12000 || cfg.AgentToolConcurrency != 2 {
 		t.Fatalf("unexpected defaults: %#v", cfg)
 	}
+	if cfg.NotificationDebounce.String() != "2m0s" {
+		t.Fatalf("notification debounce = %s", cfg.NotificationDebounce)
+	}
 	if cfg.LLMFallbackModel != "" {
 		t.Fatalf("fallback model = %q, want disabled", cfg.LLMFallbackModel)
 	}

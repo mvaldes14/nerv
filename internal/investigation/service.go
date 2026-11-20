@@ -65,6 +65,8 @@ type Generation struct {
 type Finding struct {
 	ID                string         `json:"id"`
 	WorkflowID        string         `json:"workflow_id"`
+	Source            string         `json:"source"`
+	Target            *Target        `json:"target,omitempty"`
 	Question          string         `json:"question"`
 	Answer            string         `json:"answer"`
 	Evidence          []Evidence     `json:"evidence"`
@@ -120,6 +122,22 @@ type NotificationAttempt struct {
 	Status      string    `json:"status"`
 	Error       string    `json:"error,omitempty"`
 	AttemptedAt time.Time `json:"attempted_at"`
+}
+
+type NotificationBatchItem struct {
+	IncidentID string
+	WorkflowID string
+	Question   string
+	Action     string
+	Target     *Target
+}
+
+type NotificationBatch struct {
+	ID         string
+	DueAt      time.Time
+	ExternalID string
+	Sent       bool
+	Items      []NotificationBatchItem
 }
 
 type Investigation struct {
@@ -391,6 +409,8 @@ func (s *Service) Investigate(ctx dbos.Context, req Request) (finding Finding, w
 		return Finding{
 			ID:                req.ID,
 			WorkflowID:        workflowID,
+			Source:            req.Source,
+			Target:            req.Target,
 			Question:          req.Question,
 			Answer:            generation.Answer,
 			Evidence:          evidence,

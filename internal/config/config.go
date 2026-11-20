@@ -27,6 +27,7 @@ type Config struct {
 	DecisionVersion                string
 	GotifyURL                      string
 	GotifyToken                    string
+	NotificationDebounce           time.Duration
 	HTTPTimeout                    time.Duration
 	AgentMaxRounds                 int
 	AgentMaxToolCalls              int
@@ -79,6 +80,9 @@ func Load() (Config, error) {
 		DetectionNamespaces:            listOr("NERV_DETECTION_NAMESPACES", nil),
 		DetectionMaintenanceAnnotation: envOr("NERV_DETECTION_MAINTENANCE_ANNOTATION", "nerv.io/maintenance"),
 		OTLPEndpoint:                   os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+	}
+	if cfg.NotificationDebounce, err = durationOr("NERV_NOTIFICATION_DEBOUNCE", 2*time.Minute); err != nil {
+		return Config{}, err
 	}
 	if cfg.AgentMaxRounds, err = intOr("NERV_AGENT_MAX_ROUNDS", 4); err != nil {
 		return Config{}, err
@@ -155,6 +159,9 @@ func (c Config) Validate() error {
 	}
 	if c.HTTPTimeout > 5*time.Minute || c.AgentTimeout > 15*time.Minute || c.AgentModelTimeout > 5*time.Minute || c.AgentToolTimeout > 5*time.Minute {
 		return fmt.Errorf("HTTP and agent timeouts exceed safety caps")
+	}
+	if c.NotificationDebounce <= 0 || c.NotificationDebounce > 15*time.Minute {
+		return fmt.Errorf("NERV_NOTIFICATION_DEBOUNCE must be positive and at most 15m")
 	}
 	if c.LLMFallbackModel != "" && c.LLMFallbackModel == c.LLMModel {
 		return fmt.Errorf("NERV_LLM_FALLBACK_MODEL must differ from NERV_LLM_MODEL")

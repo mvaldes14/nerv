@@ -112,6 +112,24 @@ CREATE TABLE IF NOT EXISTS nerv.notification_attempts (
     attempted_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS nerv.notification_batches (
+    id text PRIMARY KEY,
+    sink text NOT NULL,
+    leader_incident_id text NOT NULL REFERENCES nerv.incidents(id) ON DELETE CASCADE,
+    state text NOT NULL DEFAULT 'pending',
+    due_at timestamptz NOT NULL,
+    external_id text NOT NULL DEFAULT '',
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS nerv.notification_batch_items (
+    batch_id text NOT NULL REFERENCES nerv.notification_batches(id) ON DELETE CASCADE,
+    incident_id text NOT NULL REFERENCES nerv.incidents(id) ON DELETE CASCADE,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (batch_id, incident_id)
+);
+
 ALTER TABLE nerv.findings ADD COLUMN IF NOT EXISTS confidence text NOT NULL DEFAULT 'unknown';
 ALTER TABLE nerv.findings ADD COLUMN IF NOT EXISTS uncertainty jsonb NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE nerv.findings ADD COLUMN IF NOT EXISTS recommended_action text NOT NULL DEFAULT '';
@@ -121,6 +139,8 @@ ALTER TABLE nerv.findings ADD COLUMN IF NOT EXISTS budget jsonb NOT NULL DEFAULT
 CREATE INDEX IF NOT EXISTS incidents_status_updated_idx ON nerv.incidents(status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS incident_correlations_incident_idx ON nerv.incident_correlations(incident_id);
 CREATE INDEX IF NOT EXISTS notification_attempts_incident_idx ON nerv.notification_attempts(incident_id, attempted_at DESC);
+CREATE INDEX IF NOT EXISTS notification_batches_pending_idx ON nerv.notification_batches(sink, state, created_at);
+CREATE INDEX IF NOT EXISTS notification_batch_items_batch_idx ON nerv.notification_batch_items(batch_id, created_at);
 `
 	if _, err := conn.Exec(ctx, migration); err != nil {
 		return fmt.Errorf("migrate NERV schema: %w", err)
@@ -346,6 +366,8 @@ WHERE i.id = $1`, incidentID).Scan(
 	if hasFinding {
 		finding.ID = detail.Incident.ID
 		finding.WorkflowID = detail.Incident.WorkflowID
+		finding.Source = detail.Incident.Source
+		finding.Target = detail.Incident.Target
 		finding.Question = detail.Incident.Question
 		finding.Evidence = detail.Evidence
 		if err := json.Unmarshal(decisionJSON, &finding.Decision); err != nil {
@@ -487,6 +509,133 @@ INSERT INTO nerv.notification_attempts (incident_id, sink, external_id, status, 
 VALUES ($1, $2, $3, $4, $5)`, incidentID, sink, externalID, status, errorMessage)
 	if err != nil {
 		return fmt.Errorf("record notification attempt: %w", err)
+	}
+	return nil
+}
+
+func (p *Postgres) QueueNotificationBatch(ctx context.Context, incidentID, sink string, debounce time.Duration) (string, bool, error) {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return "", false, fmt.Errorf("begin notification batch transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "notification-batch:"+sink); err != nil {
+		return "", false, fmt.Errorf("lock notification batch: %w", err)
+	}
+
+	var batchID, leaderIncidentID string
+	err = tx.QueryRow(ctx, `
+SELECT id, leader_incident_id
+FROM nerv.notification_batches
+WHERE sink = $1 AND state = 'pending'
+ORDER BY created_at
+LIMIT 1
+FOR UPDATE`, sink).Scan(&batchID, &leaderIncidentID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		batchID = uuid.NewString()
+		leaderIncidentID = incidentID
+		_, err = tx.Exec(ctx, `
+INSERT INTO nerv.notification_batches (id, sink, leader_incident_id, due_at)
+VALUES ($1, $2, $3, now() + $4 * interval '1 millisecond')`, batchID, sink, incidentID, debounce.Milliseconds())
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("resolve notification batch: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+INSERT INTO nerv.notification_batch_items (batch_id, incident_id)
+VALUES ($1, $2)
+ON CONFLICT (batch_id, incident_id) DO NOTHING`, batchID, incidentID); err != nil {
+		return "", false, fmt.Errorf("add notification batch item: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+UPDATE nerv.notification_batches
+SET due_at = now() + $2 * interval '1 millisecond', updated_at = now()
+WHERE id = $1`, batchID, debounce.Milliseconds()); err != nil {
+		return "", false, fmt.Errorf("extend notification batch debounce: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", false, fmt.Errorf("commit notification batch: %w", err)
+	}
+	return batchID, leaderIncidentID == incidentID, nil
+}
+
+func (p *Postgres) GetNotificationBatch(ctx context.Context, batchID string) (investigation.NotificationBatch, error) {
+	batch := investigation.NotificationBatch{ID: batchID}
+	var state string
+	if err := p.pool.QueryRow(ctx, `
+SELECT due_at, state, external_id
+FROM nerv.notification_batches
+WHERE id = $1`, batchID).Scan(&batch.DueAt, &state, &batch.ExternalID); err != nil {
+		return investigation.NotificationBatch{}, fmt.Errorf("get notification batch: %w", err)
+	}
+	batch.Sent = state == "sent"
+	if batch.Sent || time.Now().Before(batch.DueAt) {
+		return batch, nil
+	}
+
+	rows, err := p.pool.Query(ctx, `
+SELECT i.id, i.workflow_id, i.question, i.target, f.decision->>'action'
+FROM nerv.notification_batch_items bi
+JOIN nerv.incidents i ON i.id = bi.incident_id
+JOIN nerv.findings f ON f.incident_id = i.id
+WHERE bi.batch_id = $1
+ORDER BY bi.created_at, i.id`, batchID)
+	if err != nil {
+		return investigation.NotificationBatch{}, fmt.Errorf("list notification batch items: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var item investigation.NotificationBatchItem
+		var targetJSON []byte
+		if err := rows.Scan(&item.IncidentID, &item.WorkflowID, &item.Question, &targetJSON, &item.Action); err != nil {
+			return investigation.NotificationBatch{}, fmt.Errorf("scan notification batch item: %w", err)
+		}
+		if err := json.Unmarshal(targetJSON, &item.Target); err != nil {
+			return investigation.NotificationBatch{}, fmt.Errorf("decode notification batch target: %w", err)
+		}
+		batch.Items = append(batch.Items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return investigation.NotificationBatch{}, fmt.Errorf("read notification batch items: %w", err)
+	}
+	return batch, nil
+}
+
+func (p *Postgres) FailNotificationBatch(ctx context.Context, batchID string) error {
+	_, err := p.pool.Exec(ctx, `
+UPDATE nerv.notification_batches
+SET state = 'failed', updated_at = now()
+WHERE id = $1 AND state = 'pending'`, batchID)
+	if err != nil {
+		return fmt.Errorf("fail notification batch: %w", err)
+	}
+	return nil
+}
+
+func (p *Postgres) CompleteNotificationBatch(ctx context.Context, batchID, sink, externalID string) error {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin complete notification batch transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	result, err := tx.Exec(ctx, `
+UPDATE nerv.notification_batches
+SET state = 'sent', external_id = $2, updated_at = now()
+WHERE id = $1 AND state = 'pending'`, batchID, externalID)
+	if err != nil {
+		return fmt.Errorf("complete notification batch: %w", err)
+	}
+	if result.RowsAffected() > 0 {
+		if _, err := tx.Exec(ctx, `
+INSERT INTO nerv.notification_attempts (incident_id, sink, external_id, status)
+SELECT incident_id, $2, $3, 'sent'
+FROM nerv.notification_batch_items
+WHERE batch_id = $1`, batchID, sink, externalID); err != nil {
+			return fmt.Errorf("record notification batch attempts: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit completed notification batch: %w", err)
 	}
 	return nil
 }
