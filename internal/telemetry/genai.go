@@ -20,6 +20,8 @@ const (
 	telemetryContentCaptureEnabled = false
 )
 
+var tokenUsageHistogram metric.Int64Histogram
+
 type ChatSpan struct {
 	ctx      context.Context
 	span     trace.Span
@@ -183,13 +185,21 @@ func (s *ChatSpan) Failure(err error, errorType string) {
 	s.span.End()
 }
 
-func recordTokenUsage(ctx context.Context, provider, model string, inputTokens, outputTokens int) {
+func configureGenAIMetrics() error {
 	histogram, err := otel.Meter(instrumentationName).Int64Histogram(
 		genAITokenUsageMetricName,
 		metric.WithUnit("{token}"),
 		metric.WithDescription("Number of input and output tokens used by GenAI client operations."),
 	)
 	if err != nil {
+		return err
+	}
+	tokenUsageHistogram = histogram
+	return nil
+}
+
+func recordTokenUsage(ctx context.Context, provider, model string, inputTokens, outputTokens int) {
+	if tokenUsageHistogram == nil {
 		return
 	}
 	base := []attribute.KeyValue{
@@ -198,10 +208,10 @@ func recordTokenUsage(ctx context.Context, provider, model string, inputTokens, 
 		attribute.String("gen_ai.request.model", model),
 	}
 	if inputTokens > 0 {
-		histogram.Record(ctx, int64(inputTokens), metric.WithAttributes(append(base, attribute.String("gen_ai.token.type", "input"))...))
+		tokenUsageHistogram.Record(ctx, int64(inputTokens), metric.WithAttributes(append(base, attribute.String("gen_ai.token.type", "input"))...))
 	}
 	if outputTokens > 0 {
-		histogram.Record(ctx, int64(outputTokens), metric.WithAttributes(append(base, attribute.String("gen_ai.token.type", "output"))...))
+		tokenUsageHistogram.Record(ctx, int64(outputTokens), metric.WithAttributes(append(base, attribute.String("gen_ai.token.type", "output"))...))
 	}
 }
 

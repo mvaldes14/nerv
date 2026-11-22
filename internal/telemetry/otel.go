@@ -64,6 +64,11 @@ func Setup(ctx context.Context, serviceName, endpoint string, insecure bool) (fu
 	)
 	otel.SetTracerProvider(traceProvider)
 	otel.SetMeterProvider(metricProvider)
+	if err := configureGenAIMetrics(); err != nil {
+		_ = traceProvider.Shutdown(ctx)
+		_ = metricProvider.Shutdown(ctx)
+		return nil, fmt.Errorf("create GenAI metrics: %w", err)
+	}
 
 	return func(shutdownCtx context.Context) error {
 		return errors.Join(traceProvider.Shutdown(shutdownCtx), metricProvider.Shutdown(shutdownCtx))

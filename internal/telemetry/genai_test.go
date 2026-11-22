@@ -90,6 +90,9 @@ func TestChatRecordsTokenMetricsWithoutContent(t *testing.T) {
 	previousMeterProvider := otel.GetMeterProvider()
 	otel.SetTracerProvider(tracerProvider)
 	otel.SetMeterProvider(meterProvider)
+	if err := configureGenAIMetrics(); err != nil {
+		t.Fatal(err)
+	}
 	defer otel.SetTracerProvider(previousTracerProvider)
 	defer otel.SetMeterProvider(previousMeterProvider)
 
