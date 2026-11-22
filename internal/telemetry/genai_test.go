@@ -2,10 +2,13 @@ package telemetry
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
@@ -73,6 +76,65 @@ func TestWorkflowLinksIntakeAndParentsTools(t *testing.T) {
 	} {
 		if got := attrs[key]; got != want {
 			t.Errorf("attribute %s = %#v, want %#v", key, got, want)
+		}
+	}
+}
+
+func TestChatRecordsTokenMetricsWithoutContent(t *testing.T) {
+	spanRecorder := tracetest.NewSpanRecorder()
+	tracerProvider := sdktrace.NewTracerProvider()
+	tracerProvider.RegisterSpanProcessor(spanRecorder)
+	metricReader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(metricReader))
+	previousTracerProvider := otel.GetTracerProvider()
+	previousMeterProvider := otel.GetMeterProvider()
+	otel.SetTracerProvider(tracerProvider)
+	otel.SetMeterProvider(meterProvider)
+	if err := configureGenAIMetrics(); err != nil {
+		t.Fatal(err)
+	}
+	defer otel.SetTracerProvider(previousTracerProvider)
+	defer otel.SetMeterProvider(previousMeterProvider)
+
+	_, chat := StartChat(context.Background(), "agentgateway", "openai/gpt-5-mini", "http://agentgateway", 0)
+	chat.Success("openai/gpt-5-mini", "response-1", []string{"stop"}, 42, 7)
+
+	var metrics metricdata.ResourceMetrics
+	if err := metricReader.Collect(context.Background(), &metrics); err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]int64{}
+	for _, scope := range metrics.ScopeMetrics {
+		for _, item := range scope.Metrics {
+			if item.Name != genAITokenUsageMetricName {
+				continue
+			}
+			histogram, ok := item.Data.(metricdata.Histogram[int64])
+			if !ok {
+				t.Fatalf("metric data type = %T", item.Data)
+			}
+			for _, point := range histogram.DataPoints {
+				tokenType, ok := point.Attributes.Value("gen_ai.token.type")
+				if !ok || point.Count != 1 {
+					continue
+				}
+				values[tokenType.AsString()] = point.Sum
+			}
+		}
+	}
+	if values["input"] != 42 || values["output"] != 7 {
+		t.Fatalf("token metrics = %#v", values)
+	}
+
+	if telemetryContentCaptureEnabled {
+		t.Fatal("telemetry content capture must remain disabled")
+	}
+	for _, span := range spanRecorder.Ended() {
+		for _, attr := range span.Attributes() {
+			key := string(attr.Key)
+			if strings.Contains(key, "input.messages") || strings.Contains(key, "output.messages") || strings.Contains(key, "prompt") || strings.Contains(key, "completion") {
+				t.Fatalf("content attribute exported: %s", key)
+			}
 		}
 	}
 }

@@ -2,41 +2,86 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.37.0"
 )
+
+const SemanticConventionVersion = "1.37.0"
 
 func Setup(ctx context.Context, serviceName, endpoint string, insecure bool) (func(context.Context) error, error) {
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 	if endpoint == "" {
 		return func(context.Context) error { return nil }, nil
 	}
-	opts := []otlptracegrpc.Option{otlptracegrpc.WithEndpoint(endpoint)}
-	if insecure {
-		opts = append(opts, otlptracegrpc.WithInsecure())
+
+	var traceOpts []otlptracegrpc.Option
+	var metricOpts []otlpmetricgrpc.Option
+	if strings.Contains(endpoint, "://") {
+		traceOpts = append(traceOpts, otlptracegrpc.WithEndpointURL(endpoint))
+		metricOpts = append(metricOpts, otlpmetricgrpc.WithEndpointURL(endpoint))
+	} else {
+		traceOpts = append(traceOpts, otlptracegrpc.WithEndpoint(endpoint))
+		metricOpts = append(metricOpts, otlpmetricgrpc.WithEndpoint(endpoint))
 	}
-	exporter, err := otlptracegrpc.New(ctx, opts...)
+	if insecure {
+		traceOpts = append(traceOpts, otlptracegrpc.WithInsecure())
+		metricOpts = append(metricOpts, otlpmetricgrpc.WithInsecure())
+	}
+	traceExporter, err := otlptracegrpc.New(ctx, traceOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("create OTLP trace exporter: %w", err)
 	}
-	res, err := resource.Merge(resource.Default(), resource.NewWithAttributes(
-		semconv.SchemaURL,
-		semconv.ServiceName(serviceName),
-	))
+	metricExporter, err := otlpmetricgrpc.New(ctx, metricOpts...)
 	if err != nil {
+		_ = traceExporter.Shutdown(ctx)
+		return nil, fmt.Errorf("create OTLP metric exporter: %w", err)
+	}
+	res, err := telemetryResource(serviceName)
+	if err != nil {
+		_ = traceExporter.Shutdown(ctx)
+		_ = metricExporter.Shutdown(ctx)
 		return nil, fmt.Errorf("create OTel resource: %w", err)
 	}
-	provider := sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(exporter, sdktrace.WithBatchTimeout(2*time.Second)),
+
+	traceProvider := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(traceExporter, sdktrace.WithBatchTimeout(2*time.Second)),
 		sdktrace.WithResource(res),
 	)
-	otel.SetTracerProvider(provider)
-	return provider.Shutdown, nil
+	metricProvider := sdkmetric.NewMeterProvider(
+		sdkmetric.WithResource(res),
+		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExporter, sdkmetric.WithInterval(10*time.Second))),
+	)
+	otel.SetTracerProvider(traceProvider)
+	otel.SetMeterProvider(metricProvider)
+	if err := configureGenAIMetrics(); err != nil {
+		_ = traceProvider.Shutdown(ctx)
+		_ = metricProvider.Shutdown(ctx)
+		return nil, fmt.Errorf("create GenAI metrics: %w", err)
+	}
+
+	return func(shutdownCtx context.Context) error {
+		return errors.Join(traceProvider.Shutdown(shutdownCtx), metricProvider.Shutdown(shutdownCtx))
+	}, nil
+}
+
+func telemetryResource(serviceName string) (*resource.Resource, error) {
+	return mergeServiceResource(resource.Default(), serviceName)
+}
+
+func mergeServiceResource(base *resource.Resource, serviceName string) (*resource.Resource, error) {
+	// The base may use a newer schema URL through transitive instrumentation.
+	// Merge schemaless service attributes so mixed dependency versions cannot
+	// make telemetry initialization fatal.
+	return resource.Merge(base, resource.NewSchemaless(semconv.ServiceName(serviceName)))
 }

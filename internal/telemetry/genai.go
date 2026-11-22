@@ -9,14 +9,24 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
 
-const instrumentationName = "github.com/mvaldes14/nerv"
+const (
+	instrumentationName            = "github.com/mvaldes14/nerv"
+	genAITokenUsageMetricName      = "gen_ai.client.token.usage"
+	telemetryContentCaptureEnabled = false
+)
+
+var tokenUsageHistogram metric.Int64Histogram
 
 type ChatSpan struct {
-	span trace.Span
+	ctx      context.Context
+	span     trace.Span
+	provider string
+	model    string
 }
 
 type OperationSpan struct {
@@ -141,7 +151,7 @@ func StartChat(ctx context.Context, provider, model, endpoint string, temperatur
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(attrs...),
 	)
-	return ctx, &ChatSpan{span: span}
+	return ctx, &ChatSpan{ctx: ctx, span: span, provider: provider, model: model}
 }
 
 func (s *ChatSpan) Success(responseModel, responseID string, finishReasons []string, inputTokens, outputTokens int) {
@@ -162,6 +172,7 @@ func (s *ChatSpan) Success(responseModel, responseID string, finishReasons []str
 		attrs = append(attrs, attribute.Int("gen_ai.usage.output_tokens", outputTokens))
 	}
 	s.span.SetAttributes(attrs...)
+	recordTokenUsage(s.ctx, s.provider, s.model, inputTokens, outputTokens)
 	s.span.End()
 }
 
@@ -172,6 +183,36 @@ func (s *ChatSpan) Failure(err error, errorType string) {
 	s.span.SetAttributes(attribute.String("error.type", errorType))
 	s.span.SetStatus(codes.Error, "")
 	s.span.End()
+}
+
+func configureGenAIMetrics() error {
+	histogram, err := otel.Meter(instrumentationName).Int64Histogram(
+		genAITokenUsageMetricName,
+		metric.WithUnit("{token}"),
+		metric.WithDescription("Number of input and output tokens used by GenAI client operations."),
+	)
+	if err != nil {
+		return err
+	}
+	tokenUsageHistogram = histogram
+	return nil
+}
+
+func recordTokenUsage(ctx context.Context, provider, model string, inputTokens, outputTokens int) {
+	if tokenUsageHistogram == nil {
+		return
+	}
+	base := []attribute.KeyValue{
+		attribute.String("gen_ai.operation.name", "chat"),
+		attribute.String("gen_ai.provider.name", provider),
+		attribute.String("gen_ai.request.model", model),
+	}
+	if inputTokens > 0 {
+		tokenUsageHistogram.Record(ctx, int64(inputTokens), metric.WithAttributes(append(base, attribute.String("gen_ai.token.type", "input"))...))
+	}
+	if outputTokens > 0 {
+		tokenUsageHistogram.Record(ctx, int64(outputTokens), metric.WithAttributes(append(base, attribute.String("gen_ai.token.type", "output"))...))
+	}
 }
 
 func classifyError(err error) string {
