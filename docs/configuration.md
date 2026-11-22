@@ -43,7 +43,7 @@ NERV reads configuration from environment variables. The Kubernetes manifests lo
 | `NERV_DETECTION_RESTART_WINDOW` | `10m` | Only count an unexpected restart when its latest termination finished within this window |
 | `NERV_DETECTION_NAMESPACES` | empty (all) | Comma-separated namespace allowlist; the base manifest starts with `nerv` only |
 | `NERV_DETECTION_MAINTENANCE_ANNOTATION` | `nerv.io/maintenance` | Resource annotation that suppresses detection when set to `true` or present with an empty value |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | empty | OTLP gRPC host and port; empty disables HTTP, service, and GenAI trace export |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | empty | OTLP gRPC URL; empty disables HTTP, service, and GenAI trace/metric export |
 | `OTEL_EXPORTER_OTLP_INSECURE` | `true` | Use plaintext OTLP gRPC |
 
 Agent limits must be positive and within built-in safety caps. Startup fails on invalid values. Configure both price variables together; configuring a cost ceiling without both prices also fails startup. When prices are absent, token limits still apply and findings report cost accounting as `unknown_disabled` rather than inventing a cost.
@@ -103,4 +103,6 @@ A different cluster should patch these values instead of editing application cod
 
 ## Telemetry content policy
 
-NERV emits GenAI operation metadata such as model names, token counts, finish reasons, and errors. It does not export prompts, Kubernetes evidence, model responses, system instructions, or tool arguments/results. Content capture must remain opt-in if added later and must apply redaction and size limits before export.
+NERV pins emitted telemetry to OpenTelemetry semantic conventions `1.37.0`. It exports traces plus the `gen_ai.client.token.usage` histogram, with `gen_ai.token.type=input|output`, through the configured OTLP gRPC endpoint.
+
+NERV emits GenAI operation metadata such as model names, token counts, finish reasons, and errors. Content capture is disabled in code: it does not export prompts, Kubernetes evidence, model responses, system instructions, or tool arguments/results. Any future content capture requires an explicit security review, opt-in configuration, redaction, and size limits before export.
