@@ -12,6 +12,7 @@ import (
 
 	"github.com/mvaldes14/nerv/internal/detection"
 	"github.com/mvaldes14/nerv/internal/investigation"
+	"github.com/mvaldes14/nerv/internal/remediation"
 )
 
 type fakeInvestigationService struct {
@@ -38,6 +39,33 @@ func (f *fakeInvestigationService) Get(context.Context, string) (investigation.I
 func (f *fakeInvestigationService) List(_ context.Context, filter investigation.IncidentFilter) (investigation.IncidentPage, error) {
 	f.listFilter = filter
 	return f.page, nil
+}
+
+type fakeRemediationService struct {
+	createRequest remediation.CreateRequest
+	decision      remediation.DecisionRequest
+	authSubject   string
+	proposal      remediation.Proposal
+	err           error
+}
+
+func (f *fakeRemediationService) Create(_ context.Context, _ string, req remediation.CreateRequest) (remediation.Proposal, error) {
+	f.createRequest = req
+	return f.proposal, f.err
+}
+func (f *fakeRemediationService) List(context.Context, string) ([]remediation.Proposal, error) {
+	return []remediation.Proposal{f.proposal}, f.err
+}
+func (f *fakeRemediationService) Get(context.Context, string) (remediation.Proposal, error) {
+	return f.proposal, f.err
+}
+func (f *fakeRemediationService) Approve(_ context.Context, _ string, req remediation.DecisionRequest, subject string) (remediation.Proposal, error) {
+	f.decision, f.authSubject = req, subject
+	return f.proposal, f.err
+}
+func (f *fakeRemediationService) Reject(_ context.Context, _ string, req remediation.DecisionRequest, subject string) (remediation.Proposal, error) {
+	f.decision, f.authSubject = req, subject
+	return f.proposal, f.err
 }
 
 func TestAlertRequestCorrelatesWithAutonomousFailure(t *testing.T) {
@@ -193,6 +221,126 @@ func TestOperatorUIAndAssetsLoadWithoutAuthentication(t *testing.T) {
 	}
 }
 
+func TestRemediationRoutesRequireBearerAuthentication(t *testing.T) {
+	handler := NewHandler(Dependencies{Service: &fakeInvestigationService{}, Remediation: &fakeRemediationService{}, AuthToken: "secret"})
+	for _, test := range []struct {
+		method string
+		path   string
+	}{
+		{method: http.MethodPost, path: "/investigations/inc-1/remediation-proposals"},
+		{method: http.MethodGet, path: "/investigations/inc-1/remediation-proposals"},
+		{method: http.MethodGet, path: "/remediation-proposals/proposal-1"},
+		{method: http.MethodPost, path: "/remediation-proposals/proposal-1/approve"},
+		{method: http.MethodPost, path: "/remediation-proposals/proposal-1/reject"},
+	} {
+		t.Run(test.method+" "+test.path, func(t *testing.T) {
+			req := httptest.NewRequest(test.method, test.path, strings.NewReader(`{}`))
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, req)
+			if response.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
+			}
+		})
+	}
+}
+
+func TestRemediationEndpointsReturnProposalData(t *testing.T) {
+	service := &fakeRemediationService{proposal: remediation.Proposal{ID: "proposal-1", IncidentID: "inc-1", Status: remediation.StatusPending}}
+	handler := NewHandler(Dependencies{Service: &fakeInvestigationService{}, Remediation: service, AuthToken: "secret"})
+	createBody := `{"action_kind":"set_workload_replicas/v1","target_id":"checkout","expected":{"replicas":2},"desired":{"replicas":3},"summary":"scale","rationale":"load","risk":{"level":"low","detail":"bounded"},"evidence_ordinals":[0]}`
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   string
+		want   int
+	}{
+		{name: "create", method: http.MethodPost, path: "/investigations/inc-1/remediation-proposals", body: createBody, want: http.StatusCreated},
+		{name: "list", method: http.MethodGet, path: "/investigations/inc-1/remediation-proposals", want: http.StatusOK},
+		{name: "get", method: http.MethodGet, path: "/remediation-proposals/proposal-1", want: http.StatusOK},
+		{name: "reject", method: http.MethodPost, path: "/remediation-proposals/proposal-1/reject", body: `{"actor":"alice","comment":"not now"}`, want: http.StatusOK},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+			req.Header.Set("Authorization", "Bearer secret")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, req)
+			if response.Code != test.want {
+				t.Fatalf("status = %d, want %d: %s", response.Code, test.want, response.Body.String())
+			}
+			if !strings.Contains(response.Body.String(), "proposal-1") {
+				t.Fatalf("body = %s", response.Body.String())
+			}
+		})
+	}
+}
+
+func TestCreateRemediationProposalStrictlyRejectsExecutableFields(t *testing.T) {
+	service := &fakeRemediationService{}
+	handler := NewHandler(Dependencies{Service: &fakeInvestigationService{}, Remediation: service, AuthToken: "secret"})
+	body := `{
+		"action_kind":"set_workload_replicas/v1",
+		"target_id":"checkout",
+		"expected":{"replicas":2},
+		"desired":{"replicas":3},
+		"summary":"scale",
+		"rationale":"load",
+		"risk":{"level":"low","detail":"bounded"},
+		"evidence_ordinals":[0],
+		"repository":"attacker/repo",
+		"patch":"rm -rf /"
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/investigations/inc-1/remediation-proposals", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d: %s", response.Code, http.StatusBadRequest, response.Body.String())
+	}
+	if service.createRequest.ActionKind != "" {
+		t.Fatal("service called for request containing forbidden fields")
+	}
+}
+
+func TestApproveRemediationProposalRecordsSharedBearerSubject(t *testing.T) {
+	service := &fakeRemediationService{proposal: remediation.Proposal{ID: "proposal-1", Status: remediation.StatusApproved}}
+	handler := NewHandler(Dependencies{Service: &fakeInvestigationService{}, Remediation: service, AuthToken: "secret"})
+	req := httptest.NewRequest(http.MethodPost, "/remediation-proposals/proposal-1/approve", strings.NewReader(`{"actor":"alice","comment":"reviewed"}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", response.Code, http.StatusOK, response.Body.String())
+	}
+	if service.authSubject != "shared-bearer" || service.decision.Actor != "alice" {
+		t.Fatalf("decision=%+v subject=%q", service.decision, service.authSubject)
+	}
+}
+
+func TestRemediationErrorsMapToContractStatus(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "validation", err: &remediation.ValidationError{Message: "invalid"}, want: http.StatusBadRequest},
+		{name: "missing", err: remediation.ErrNotFound, want: http.StatusNotFound},
+		{name: "terminal", err: remediation.ErrConflict, want: http.StatusConflict},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handler := NewHandler(Dependencies{Service: &fakeInvestigationService{}, Remediation: &fakeRemediationService{err: test.err}})
+			req := httptest.NewRequest(http.MethodGet, "/remediation-proposals/proposal-1", nil)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, req)
+			if response.Code != test.want {
+				t.Fatalf("status = %d, want %d", response.Code, test.want)
+			}
+		})
+	}
+}
+
 func TestOperatorUIRendersSuppressionAsPolicyOutcome(t *testing.T) {
 	handler := NewHandler(Dependencies{Service: &fakeInvestigationService{}})
 	req := httptest.NewRequest(http.MethodGet, "/ui/app.js", nil)
@@ -207,7 +355,14 @@ func TestOperatorUIRendersSuppressionAsPolicyOutcome(t *testing.T) {
 			t.Errorf("app.js does not contain %q", text)
 		}
 	}
-	if strings.Contains(script, "innerHTML") {
-		t.Fatal("app.js must render persisted text without innerHTML")
+	for _, forbidden := range []string{"innerHTML", "insertAdjacentHTML", "eval("} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("app.js must not contain %q", forbidden)
+		}
+	}
+	for _, required := range []string{"GitOps remediation proposals", "rendered_diff", "window.confirm", "Approve", "Reject"} {
+		if !strings.Contains(script, required) {
+			t.Errorf("app.js does not contain %q", required)
+		}
 	}
 }

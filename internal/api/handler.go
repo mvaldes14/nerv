@@ -17,6 +17,7 @@ import (
 
 	"github.com/mvaldes14/nerv/internal/detection"
 	"github.com/mvaldes14/nerv/internal/investigation"
+	"github.com/mvaldes14/nerv/internal/remediation"
 )
 
 type investigationService interface {
@@ -27,19 +28,29 @@ type investigationService interface {
 	List(context.Context, investigation.IncidentFilter) (investigation.IncidentPage, error)
 }
 
+type remediationService interface {
+	Create(context.Context, string, remediation.CreateRequest) (remediation.Proposal, error)
+	List(context.Context, string) ([]remediation.Proposal, error)
+	Get(context.Context, string) (remediation.Proposal, error)
+	Approve(context.Context, string, remediation.DecisionRequest, string) (remediation.Proposal, error)
+	Reject(context.Context, string, remediation.DecisionRequest, string) (remediation.Proposal, error)
+}
+
 type Dependencies struct {
-	Service    investigationService
-	AuthToken  string
-	AskTimeout time.Duration
-	Logger     *slog.Logger
+	Service     investigationService
+	Remediation remediationService
+	AuthToken   string
+	AskTimeout  time.Duration
+	Logger      *slog.Logger
 }
 
 type Handler struct {
-	mux        *http.ServeMux
-	service    investigationService
-	authToken  string
-	logger     *slog.Logger
-	askTimeout time.Duration
+	mux         *http.ServeMux
+	service     investigationService
+	remediation remediationService
+	authToken   string
+	logger      *slog.Logger
+	askTimeout  time.Duration
 }
 
 func NewHandler(deps Dependencies) http.Handler {
@@ -51,7 +62,7 @@ func NewHandler(deps Dependencies) http.Handler {
 	if askTimeout <= 0 {
 		askTimeout = 90 * time.Second
 	}
-	h := &Handler{mux: http.NewServeMux(), service: deps.Service, authToken: deps.AuthToken, logger: logger, askTimeout: askTimeout}
+	h := &Handler{mux: http.NewServeMux(), service: deps.Service, remediation: deps.Remediation, authToken: deps.AuthToken, logger: logger, askTimeout: askTimeout}
 	h.routes()
 	return otelhttp.NewHandler(h, "nerv.http")
 }
@@ -67,6 +78,11 @@ func (h *Handler) routes() {
 	h.mux.Handle("POST /alert", h.requireAuth(http.HandlerFunc(h.alert)))
 	h.mux.Handle("GET /investigations", h.requireAuth(http.HandlerFunc(h.listInvestigations)))
 	h.mux.Handle("GET /investigations/{id}", h.requireAuth(http.HandlerFunc(h.getInvestigation)))
+	h.mux.Handle("POST /investigations/{id}/remediation-proposals", h.requireAuth(http.HandlerFunc(h.createRemediationProposal)))
+	h.mux.Handle("GET /investigations/{id}/remediation-proposals", h.requireAuth(http.HandlerFunc(h.listRemediationProposals)))
+	h.mux.Handle("GET /remediation-proposals/{id}", h.requireAuth(http.HandlerFunc(h.getRemediationProposal)))
+	h.mux.Handle("POST /remediation-proposals/{id}/approve", h.requireAuth(http.HandlerFunc(h.approveRemediationProposal)))
+	h.mux.Handle("POST /remediation-proposals/{id}/reject", h.requireAuth(http.HandlerFunc(h.rejectRemediationProposal)))
 }
 
 func (h *Handler) health(w http.ResponseWriter, _ *http.Request) {
@@ -188,6 +204,101 @@ func (h *Handler) getInvestigation(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *Handler) createRemediationProposal(w http.ResponseWriter, r *http.Request) {
+	if h.remediation == nil {
+		writeError(w, http.StatusServiceUnavailable, "remediation service unavailable")
+		return
+	}
+	defer r.Body.Close()
+	var req remediation.CreateRequest
+	if err := decodeStrictJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	proposal, err := h.remediation.Create(r.Context(), r.PathValue("id"), req)
+	if err != nil {
+		h.writeRemediationError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, proposal)
+}
+
+func (h *Handler) listRemediationProposals(w http.ResponseWriter, r *http.Request) {
+	if h.remediation == nil {
+		writeError(w, http.StatusServiceUnavailable, "remediation service unavailable")
+		return
+	}
+	proposals, err := h.remediation.List(r.Context(), r.PathValue("id"))
+	if err != nil {
+		h.writeRemediationError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": proposals})
+}
+
+func (h *Handler) getRemediationProposal(w http.ResponseWriter, r *http.Request) {
+	if h.remediation == nil {
+		writeError(w, http.StatusServiceUnavailable, "remediation service unavailable")
+		return
+	}
+	proposal, err := h.remediation.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		h.writeRemediationError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, proposal)
+}
+
+func (h *Handler) approveRemediationProposal(w http.ResponseWriter, r *http.Request) {
+	h.decideRemediationProposal(w, r, true)
+}
+
+func (h *Handler) rejectRemediationProposal(w http.ResponseWriter, r *http.Request) {
+	h.decideRemediationProposal(w, r, false)
+}
+
+func (h *Handler) decideRemediationProposal(w http.ResponseWriter, r *http.Request, approve bool) {
+	if h.remediation == nil {
+		writeError(w, http.StatusServiceUnavailable, "remediation service unavailable")
+		return
+	}
+	defer r.Body.Close()
+	var req remediation.DecisionRequest
+	if err := decodeStrictJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var (
+		proposal remediation.Proposal
+		err      error
+	)
+	if approve {
+		proposal, err = h.remediation.Approve(r.Context(), r.PathValue("id"), req, "shared-bearer")
+	} else {
+		proposal, err = h.remediation.Reject(r.Context(), r.PathValue("id"), req, "shared-bearer")
+	}
+	if err != nil {
+		h.writeRemediationError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, proposal)
+}
+
+func (h *Handler) writeRemediationError(w http.ResponseWriter, err error) {
+	var validation *remediation.ValidationError
+	switch {
+	case errors.As(err, &validation):
+		writeError(w, http.StatusBadRequest, validation.Error())
+	case errors.Is(err, remediation.ErrNotFound):
+		writeError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, remediation.ErrConflict):
+		writeError(w, http.StatusConflict, err.Error())
+	default:
+		h.logger.Error("remediation request failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "remediation request failed")
+	}
+}
+
 func queryInt(r *http.Request, name string) (int, error) {
 	value := strings.TrimSpace(r.URL.Query().Get(name))
 	if value == "" {
@@ -303,6 +414,22 @@ func firstNonEmpty(values ...string) string {
 func decodeJSON(r *http.Request, target any) error {
 	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
 	if err := decoder.Decode(target); err != nil {
+		return fmt.Errorf("invalid JSON body: %w", err)
+	}
+	return nil
+}
+
+func decodeStrictJSON(r *http.Request, target any) error {
+	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return fmt.Errorf("invalid JSON body: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("invalid JSON body: multiple JSON values are not allowed")
+		}
 		return fmt.Errorf("invalid JSON body: %w", err)
 	}
 	return nil

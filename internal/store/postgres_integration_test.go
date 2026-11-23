@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/mvaldes14/nerv/internal/investigation"
+	"github.com/mvaldes14/nerv/internal/remediation"
 )
 
 func openIntegrationPostgres(t *testing.T) *Postgres {
@@ -27,6 +28,176 @@ func openIntegrationPostgres(t *testing.T) *Postgres {
 		t.Fatal(err)
 	}
 	return postgres
+}
+
+func createCompletedIncident(t *testing.T, postgres *Postgres, incidentID string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := postgres.pool.Exec(ctx, `INSERT INTO nerv.incidents (id, workflow_id, source, question, status) VALUES ($1, $2, $3, 'test', 'completed')`, incidentID, "workflow-"+incidentID, investigation.SourceHTTPAsk); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := postgres.pool.Exec(ctx, `INSERT INTO nerv.evidence (incident_id, ordinal, source, summary) VALUES ($1, 0, 'kubernetes.status', 'replicas=2'), ($1, 1, 'kubernetes.metrics', 'cpu=95%')`, incidentID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := postgres.pool.Exec(ctx, `INSERT INTO nerv.findings (incident_id, workflow_id, answer, decision, created_at) VALUES ($1, $2, 'scale may help', '{}'::jsonb, now())`, incidentID, "workflow-"+incidentID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func remediationServiceForTest(t *testing.T, postgres *Postgres) *remediation.Service {
+	t.Helper()
+	service, err := remediation.NewService(remediation.Config{
+		Repository: "mvaldes14/k8s-apps",
+		Targets: []remediation.Target{{
+			ID: "checkout", Path: "apps/checkout/deployment.yaml",
+			Resource: remediation.Resource{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "apps", Name: "checkout"},
+		}},
+	}, postgres)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return service
+}
+
+func remediationRequestForTest() remediation.CreateRequest {
+	expected, desired := 2, 4
+	return remediation.CreateRequest{
+		ActionKind: remediation.ActionSetWorkloadReplicas,
+		TargetID:   "checkout", Expected: remediation.ReplicaInput{Replicas: &expected}, Desired: remediation.ReplicaInput{Replicas: &desired},
+		Summary: "Scale checkout", Rationale: "Sustained load", Risk: remediation.RiskInput{Level: "medium", Detail: "Resource use"},
+		EvidenceOrdinals: []int{0, 1}, TTLSeconds: 600,
+	}
+}
+
+func TestRemediationProposalRequiresCompletedIncidentAndValidEvidence(t *testing.T) {
+	postgres := openIntegrationPostgres(t)
+	service := remediationServiceForTest(t, postgres)
+	ctx := context.Background()
+
+	runningID := uuid.NewString()
+	if _, err := postgres.pool.Exec(ctx, `INSERT INTO nerv.incidents (id, workflow_id, source, question, status) VALUES ($1, $2, $3, 'test', 'running')`, runningID, "workflow-"+runningID, investigation.SourceHTTPAsk); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Create(ctx, runningID, remediationRequestForTest()); !errors.Is(err, remediation.ErrConflict) {
+		t.Fatalf("running incident error = %v", err)
+	}
+
+	completedID := uuid.NewString()
+	createCompletedIncident(t, postgres, completedID)
+	req := remediationRequestForTest()
+	req.EvidenceOrdinals = []int{99}
+	_, err := service.Create(ctx, completedID, req)
+	var validation *remediation.ValidationError
+	if !errors.As(err, &validation) {
+		t.Fatalf("invalid evidence error = %v", err)
+	}
+}
+
+func TestRemediationProposalPersistenceQueryAndStateTransitions(t *testing.T) {
+	postgres := openIntegrationPostgres(t)
+	incidentID := uuid.NewString()
+	createCompletedIncident(t, postgres, incidentID)
+	service := remediationServiceForTest(t, postgres)
+
+	created, err := service.Create(context.Background(), incidentID, remediationRequestForTest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Status != remediation.StatusPending || len(created.Evidence) != 2 {
+		t.Fatalf("created proposal = %+v", created)
+	}
+	if _, err := postgres.pool.Exec(context.Background(), `UPDATE nerv.evidence SET summary = 'changed after proposal' WHERE incident_id = $1 AND ordinal = 0`, incidentID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := service.Get(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Evidence[0].Summary != "replicas=2" {
+		t.Fatalf("evidence snapshot changed: %+v", got.Evidence[0])
+	}
+	listed, err := service.List(context.Background(), incidentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].ID != created.ID {
+		t.Fatalf("listed proposals = %+v", listed)
+	}
+	approved, err := service.Approve(context.Background(), created.ID, remediation.DecisionRequest{Actor: "alice", Comment: "reviewed"}, "shared-bearer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approved.Status != remediation.StatusApproved || approved.DecisionActor != "alice" || approved.DecisionAuthSubject != "shared-bearer" || approved.DecisionAt == nil {
+		t.Fatalf("approved proposal = %+v", approved)
+	}
+	if _, err := service.Reject(context.Background(), created.ID, remediation.DecisionRequest{Actor: "bob"}, "shared-bearer"); !errors.Is(err, remediation.ErrConflict) {
+		t.Fatalf("terminal transition error = %v", err)
+	}
+}
+
+func TestRemediationProposalExpiresLazilyAndCannotTransition(t *testing.T) {
+	postgres := openIntegrationPostgres(t)
+	incidentID := uuid.NewString()
+	createCompletedIncident(t, postgres, incidentID)
+	service := remediationServiceForTest(t, postgres)
+	created, err := service.Create(context.Background(), incidentID, remediationRequestForTest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := postgres.pool.Exec(context.Background(), `UPDATE nerv.remediation_proposals SET created_at = now() - interval '10 minutes', expires_at = now() - interval '1 second' WHERE id = $1`, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Approve(context.Background(), created.ID, remediation.DecisionRequest{Actor: "alice"}, "shared-bearer"); !errors.Is(err, remediation.ErrConflict) {
+		t.Fatalf("expired transition error = %v", err)
+	}
+	got, err := service.Get(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != remediation.StatusExpired {
+		t.Fatalf("status = %q, want expired", got.Status)
+	}
+}
+
+func TestRemediationConcurrentDecisionHasSingleWinner(t *testing.T) {
+	postgres := openIntegrationPostgres(t)
+	incidentID := uuid.NewString()
+	createCompletedIncident(t, postgres, incidentID)
+	service := remediationServiceForTest(t, postgres)
+	created, err := service.Create(context.Background(), incidentID, remediationRequestForTest())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	errorsCh := make(chan error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, err := service.Approve(context.Background(), created.ID, remediation.DecisionRequest{Actor: "alice"}, "shared-bearer")
+		errorsCh <- err
+	}()
+	go func() {
+		defer wg.Done()
+		_, err := service.Reject(context.Background(), created.ID, remediation.DecisionRequest{Actor: "bob"}, "shared-bearer")
+		errorsCh <- err
+	}()
+	wg.Wait()
+	close(errorsCh)
+	wins, conflicts := 0, 0
+	for err := range errorsCh {
+		switch {
+		case err == nil:
+			wins++
+		case errors.Is(err, remediation.ErrConflict):
+			conflicts++
+		default:
+			t.Fatalf("unexpected decision error: %v", err)
+		}
+	}
+	if wins != 1 || conflicts != 1 {
+		t.Fatalf("wins=%d conflicts=%d", wins, conflicts)
+	}
 }
 
 func TestAdmissionEnforcesGlobalConcurrencyAndRate(t *testing.T) {
