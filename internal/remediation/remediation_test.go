@@ -182,3 +182,12 @@ func TestDecisionPersistsSharedBearerSubject(t *testing.T) {
 		t.Fatalf("decision = %+v", proposal)
 	}
 }
+
+func TestRenderManifestRejectsInvalidReplicaCount(t *testing.T) {
+	resource := Resource{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "apps", Name: "checkout"}
+	for _, replicas := range []int{-1, MaxReplicas + 1} {
+		if _, err := renderManifest(resource, replicas); err == nil {
+			t.Fatalf("renderManifest accepted replicas=%d", replicas)
+		}
+	}
+}

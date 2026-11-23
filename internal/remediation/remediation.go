@@ -29,8 +29,17 @@ const (
 	MinTTL     = 5 * time.Minute
 	MaxTTL     = 7 * 24 * time.Hour
 
-	MaxProposals = 50
-	MaxEvidence  = 20
+	MaxProposals        = 50
+	MaxEvidence         = 20
+	MaxSummaryLength    = 200
+	MaxRationaleLength  = 4000
+	MaxRiskDetailLength = 2000
+	MinReplicas         = 0
+	MaxReplicas         = 1000
+
+	RiskLevelLow    = "low"
+	RiskLevelMedium = "medium"
+	RiskLevelHigh   = "high"
 )
 
 var (
@@ -271,8 +280,16 @@ func (s *Service) Create(ctx context.Context, incidentID string, req CreateReque
 		recordError(span, err)
 		return Proposal{}, err
 	}
-	before := renderManifest(target.Resource, expected)
-	after := renderManifest(target.Resource, desired)
+	before, err := renderManifest(target.Resource, expected)
+	if err != nil {
+		recordError(span, err)
+		return Proposal{}, err
+	}
+	after, err := renderManifest(target.Resource, desired)
+	if err != nil {
+		recordError(span, err)
+		return Proposal{}, err
+	}
 	proposal := Proposal{
 		IncidentID:       incidentID,
 		ActionKind:       req.ActionKind,
@@ -374,22 +391,22 @@ func (s *Service) validateCreate(incidentID string, req CreateRequest) (Target, 
 		return Target{}, 0, 0, 0, invalid("expected.replicas and desired.replicas are required")
 	}
 	expected, desired := *req.Expected.Replicas, *req.Desired.Replicas
-	if expected < 0 || expected > 1000 || desired < 0 || desired > 1000 {
-		return Target{}, 0, 0, 0, invalid("replicas must be between 0 and 1000")
+	if expected < MinReplicas || expected > MaxReplicas || desired < MinReplicas || desired > MaxReplicas {
+		return Target{}, 0, 0, 0, invalid("replicas must be between %d and %d", MinReplicas, MaxReplicas)
 	}
 	if expected == desired {
 		return Target{}, 0, 0, 0, invalid("expected.replicas and desired.replicas must differ")
 	}
-	if err := boundedRequired("summary", req.Summary, 200); err != nil {
+	if err := boundedRequired("summary", req.Summary, MaxSummaryLength); err != nil {
 		return Target{}, 0, 0, 0, err
 	}
-	if err := boundedRequired("rationale", req.Rationale, 4000); err != nil {
+	if err := boundedRequired("rationale", req.Rationale, MaxRationaleLength); err != nil {
 		return Target{}, 0, 0, 0, err
 	}
-	if req.Risk.Level != "low" && req.Risk.Level != "medium" && req.Risk.Level != "high" {
+	if req.Risk.Level != RiskLevelLow && req.Risk.Level != RiskLevelMedium && req.Risk.Level != RiskLevelHigh {
 		return Target{}, 0, 0, 0, invalid("risk.level must be low, medium, or high")
 	}
-	if err := boundedRequired("risk.detail", req.Risk.Detail, 2000); err != nil {
+	if err := boundedRequired("risk.detail", req.Risk.Detail, MaxRiskDetailLength); err != nil {
 		return Target{}, 0, 0, 0, err
 	}
 	if len(req.EvidenceOrdinals) == 0 || len(req.EvidenceOrdinals) > MaxEvidence {
@@ -410,7 +427,7 @@ func (s *Service) validateCreate(incidentID string, req CreateRequest) (Target, 
 		ttl = time.Duration(req.TTLSeconds) * time.Second
 	}
 	if ttl < MinTTL || ttl > MaxTTL {
-		return Target{}, 0, 0, 0, invalid("ttl_seconds must be between 300 and 604800")
+		return Target{}, 0, 0, 0, invalid("ttl_seconds must be between %d and %d", int(MinTTL.Seconds()), int(MaxTTL.Seconds()))
 	}
 	return target, expected, desired, ttl, nil
 }
@@ -423,8 +440,11 @@ func boundedRequired(name, value string, maximum int) error {
 	return nil
 }
 
-func renderManifest(resource Resource, replicas int) string {
-	return fmt.Sprintf("apiVersion: %s\nkind: %s\nmetadata:\n  name: %s\n  namespace: %s\nspec:\n  replicas: %d\n", resource.APIVersion, resource.Kind, resource.Name, resource.Namespace, replicas)
+func renderManifest(resource Resource, replicas int) (string, error) {
+	if replicas < MinReplicas || replicas > MaxReplicas {
+		return "", invalid("replicas must be between %d and %d", MinReplicas, MaxReplicas)
+	}
+	return fmt.Sprintf("apiVersion: %s\nkind: %s\nmetadata:\n  name: %s\n  namespace: %s\nspec:\n  replicas: %d\n", resource.APIVersion, resource.Kind, resource.Name, resource.Namespace, replicas), nil
 }
 
 func renderDiff(targetPath, before, after string) string {
