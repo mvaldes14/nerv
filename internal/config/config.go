@@ -41,6 +41,13 @@ type Config struct {
 	AgentMaxCostUSD                float64
 	AgentInputPricePerMTokens      float64
 	AgentOutputPricePerMTokens     float64
+	AdmissionMaxConcurrent         int
+	AdmissionLeaseTTL              time.Duration
+	AdmissionAskPerMinute          int
+	AdmissionAlertPerMinute        int
+	AdmissionDetectorPerMinute     int
+	AdmissionDailyMaxTokens        int
+	AdmissionDailyMaxCostUSD       float64
 	DetectionEnabled               bool
 	DetectionPersistence           time.Duration
 	DetectionCooldown              time.Duration
@@ -120,6 +127,27 @@ func Load() (Config, error) {
 	if cfg.AgentOutputPricePerMTokens, err = floatOr("NERV_AGENT_OUTPUT_PRICE_PER_MILLION_TOKENS_USD", 0); err != nil {
 		return Config{}, err
 	}
+	if cfg.AdmissionMaxConcurrent, err = intOr("NERV_ADMISSION_MAX_CONCURRENT", 2); err != nil {
+		return Config{}, err
+	}
+	if cfg.AdmissionLeaseTTL, err = durationOr("NERV_ADMISSION_LEASE_TTL", 10*time.Minute); err != nil {
+		return Config{}, err
+	}
+	if cfg.AdmissionAskPerMinute, err = intOr("NERV_ADMISSION_ASK_PER_MINUTE", 6); err != nil {
+		return Config{}, err
+	}
+	if cfg.AdmissionAlertPerMinute, err = intOr("NERV_ADMISSION_ALERT_PER_MINUTE", 30); err != nil {
+		return Config{}, err
+	}
+	if cfg.AdmissionDetectorPerMinute, err = intOr("NERV_ADMISSION_DETECTOR_PER_MINUTE", 30); err != nil {
+		return Config{}, err
+	}
+	if cfg.AdmissionDailyMaxTokens, err = intOr("NERV_ADMISSION_DAILY_MAX_TOKENS", 240000); err != nil {
+		return Config{}, err
+	}
+	if cfg.AdmissionDailyMaxCostUSD, err = floatOr("NERV_ADMISSION_DAILY_MAX_COST_USD", 0); err != nil {
+		return Config{}, err
+	}
 	if cfg.DetectionEnabled, err = boolOr("NERV_DETECTION_ENABLED", false); err != nil {
 		return Config{}, err
 	}
@@ -194,6 +222,24 @@ func (c Config) Validate() error {
 	}
 	if c.AgentMaxCostUSD > 0 && !pricingSet {
 		return fmt.Errorf("agent cost ceiling requires input and output price configuration")
+	}
+	if c.AdmissionMaxConcurrent > 64 {
+		return fmt.Errorf("NERV_ADMISSION_MAX_CONCURRENT must be at most 64")
+	}
+	if c.AdmissionLeaseTTL < c.AgentTimeout || c.AdmissionLeaseTTL > time.Hour {
+		return fmt.Errorf("NERV_ADMISSION_LEASE_TTL must be at least the agent timeout and at most 1h")
+	}
+	if c.AdmissionAskPerMinute > 1000 || c.AdmissionAlertPerMinute > 10000 || c.AdmissionDetectorPerMinute > 10000 {
+		return fmt.Errorf("admission per-minute limits exceed safety caps")
+	}
+	if c.AdmissionDailyMaxTokens > 100_000_000 {
+		return fmt.Errorf("NERV_ADMISSION_DAILY_MAX_TOKENS exceeds safety cap")
+	}
+	if c.AdmissionDailyMaxCostUSD > 10_000 {
+		return fmt.Errorf("NERV_ADMISSION_DAILY_MAX_COST_USD exceeds safety cap")
+	}
+	if c.AdmissionDailyMaxCostUSD > 0 && !pricingSet {
+		return fmt.Errorf("daily cost ceiling requires input and output price configuration")
 	}
 	return nil
 }

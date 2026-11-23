@@ -33,6 +33,13 @@ NERV reads configuration from environment variables. The Kubernetes manifests lo
 | `NERV_AGENT_MAX_COST_USD` | `0` | Optional known-cost ceiling; zero disables cost ceiling |
 | `NERV_AGENT_INPUT_PRICE_PER_MILLION_TOKENS_USD` | `0` | Input-token price used for cost accounting |
 | `NERV_AGENT_OUTPUT_PRICE_PER_MILLION_TOKENS_USD` | `0` | Output-token price used for cost accounting |
+| `NERV_ADMISSION_MAX_CONCURRENT` | `2` | Maximum active investigation leases shared across replicas |
+| `NERV_ADMISSION_LEASE_TTL` | `10m` | Expiry for abandoned concurrency leases; must cover the agent timeout |
+| `NERV_ADMISSION_ASK_PER_MINUTE` | `6` | Global fixed-window limit for HTTP and CLI operator questions |
+| `NERV_ADMISSION_ALERT_PER_MINUTE` | `30` | Global fixed-window limit for external alert investigations |
+| `NERV_ADMISSION_DETECTOR_PER_MINUTE` | `30` | Global fixed-window limit for autonomous detector investigations |
+| `NERV_ADMISSION_DAILY_MAX_TOKENS` | `240000` | Settled token usage allowed per UTC day before new work is rejected |
+| `NERV_ADMISSION_DAILY_MAX_COST_USD` | `0` | Optional settled daily cost ceiling; zero disables it and nonzero requires model prices |
 | `NERV_DETECTION_ENABLED` | `false` | Run autonomous Kubernetes detection with `serve`; the base manifest enables it explicitly |
 | `NERV_DETECTION_PERSISTENCE` | `2m` | Time a deterministic failure must remain present before workflow acceptance |
 | `NERV_DETECTION_COOLDOWN` | `30m` | Minimum interval before a recovered failure identity can open another investigation |
@@ -46,7 +53,15 @@ NERV reads configuration from environment variables. The Kubernetes manifests lo
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | empty | OTLP gRPC URL; empty disables HTTP, service, and GenAI trace/metric export |
 | `OTEL_EXPORTER_OTLP_INSECURE` | `true` | Use plaintext OTLP gRPC |
 
-Agent limits must be positive and within built-in safety caps. Startup fails on invalid values. Configure both price variables together; configuring a cost ceiling without both prices also fails startup. When prices are absent, token limits still apply and findings report cost accounting as `unknown_disabled` rather than inventing a cost.
+Agent and admission limits must be positive and within built-in safety caps. Startup fails on invalid values. Configure both price variables together; configuring a per-investigation or daily cost ceiling without both prices also fails startup. When prices are absent, token limits still apply and findings report cost accounting as `unknown_disabled` rather than inventing a cost.
+
+## Durable admission behavior
+
+PostgreSQL serializes admission decisions across replicas. Per-source rate windows, expiring concurrency leases, and settled UTC-day token/cost usage bound new investigations. Duplicate requests resolving to an existing workflow do not consume another rate-limit unit or concurrency lease. Abandoned leases expire after `NERV_ADMISSION_LEASE_TTL`; successfully completed workflows release immediately.
+
+HTTP `/ask` and `/alert` return `429 Too Many Requests` with `Retry-After` when admission is denied. Autonomous detector acceptance failures remain retryable through informer resync. Daily checks use completed finding budgets, so bounded in-flight work can overshoot the configured daily ceiling by at most the global concurrency limit multiplied by the per-investigation budget.
+
+Operational metrics include `nerv.admission.requests`, `nerv.admission.active`, `nerv.admission.daily_tokens`, `nerv.admission.daily_cost`, `nerv.detector.queue.depth`, `nerv.detector.queue.dropped`, and `nerv.detector.queue.wait_time`.
 
 ## Autonomous detection behavior
 

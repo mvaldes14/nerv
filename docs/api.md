@@ -227,5 +227,6 @@ Common status codes:
 | `400` | Invalid JSON, missing question, or empty alert list |
 | `401` | Missing or invalid bearer token |
 | `404` | Investigation ID not found |
+| `429` | Durable rate, concurrency, daily token, or daily spend limit rejected new work; response includes `Retry-After` |
 | `500` | Investigation failed while `/ask` was waiting |
 | `503` | Alert could not be durably accepted, or readiness failed |

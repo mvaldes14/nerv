@@ -14,6 +14,9 @@ func TestLoadAgentDefaultsAndFallbackDisabled(t *testing.T) {
 	if cfg.NotificationDebounce.String() != "2m0s" {
 		t.Fatalf("notification debounce = %s", cfg.NotificationDebounce)
 	}
+	if cfg.AdmissionMaxConcurrent != 2 || cfg.AdmissionAskPerMinute != 6 || cfg.AdmissionAlertPerMinute != 30 || cfg.AdmissionDetectorPerMinute != 30 || cfg.AdmissionDailyMaxTokens != 240000 {
+		t.Fatalf("unexpected admission defaults: %#v", cfg)
+	}
 	if cfg.LLMFallbackModel != "" {
 		t.Fatalf("fallback model = %q, want disabled", cfg.LLMFallbackModel)
 	}
@@ -31,6 +34,10 @@ func TestLoadRejectsUnsafeAgentConfiguration(t *testing.T) {
 		{key: "NERV_AGENT_MAX_TOOL_OUTPUT_BYTES", value: "128"},
 		{key: "NERV_AGENT_MAX_COST_USD", value: "1"},
 		{key: "NERV_AGENT_INPUT_PRICE_PER_MILLION_TOKENS_USD", value: "NaN"},
+		{key: "NERV_ADMISSION_MAX_CONCURRENT", value: "65"},
+		{key: "NERV_ADMISSION_LEASE_TTL", value: "30s"},
+		{key: "NERV_ADMISSION_DAILY_MAX_TOKENS", value: "100000001"},
+		{key: "NERV_ADMISSION_DAILY_MAX_COST_USD", value: "1"},
 	}
 	for _, test := range tests {
 		t.Run(test.key+"="+test.value, func(t *testing.T) {

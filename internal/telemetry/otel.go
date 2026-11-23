@@ -69,6 +69,11 @@ func Setup(ctx context.Context, serviceName, endpoint string, insecure bool) (fu
 		_ = metricProvider.Shutdown(ctx)
 		return nil, fmt.Errorf("create GenAI metrics: %w", err)
 	}
+	if err := configureOperationalMetrics(); err != nil {
+		_ = traceProvider.Shutdown(ctx)
+		_ = metricProvider.Shutdown(ctx)
+		return nil, fmt.Errorf("create operational metrics: %w", err)
+	}
 
 	return func(shutdownCtx context.Context) error {
 		return errors.Join(traceProvider.Shutdown(shutdownCtx), metricProvider.Shutdown(shutdownCtx))
