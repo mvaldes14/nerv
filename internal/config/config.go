@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mvaldes14/nerv/internal/remediation"
 )
 
 // Config contains process-level settings. Secrets come from environment
@@ -60,6 +62,7 @@ type Config struct {
 	DetectionMaintenanceAnnotation string
 	OTLPEndpoint                   string
 	OTLPInsecure                   bool
+	Remediation                    remediation.Config
 }
 
 func Load() (Config, error) {
@@ -175,6 +178,9 @@ func Load() (Config, error) {
 	if cfg.OTLPInsecure, err = boolOr("OTEL_EXPORTER_OTLP_INSECURE", true); err != nil {
 		return Config{}, err
 	}
+	if cfg.Remediation, err = remediation.ParseConfig(os.Getenv("NERV_GITOPS_REPOSITORY"), os.Getenv("NERV_GITOPS_TARGETS_JSON")); err != nil {
+		return Config{}, err
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -182,6 +188,9 @@ func Load() (Config, error) {
 }
 
 func (c Config) Validate() error {
+	if err := c.Remediation.Validate(); err != nil {
+		return err
+	}
 	if c.HTTPTimeout <= 0 || c.AgentTimeout <= 0 || c.AgentModelTimeout <= 0 || c.AgentToolTimeout <= 0 {
 		return fmt.Errorf("HTTP and agent timeouts must be positive")
 	}

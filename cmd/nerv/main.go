@@ -23,6 +23,7 @@ import (
 	k8stools "github.com/mvaldes14/nerv/internal/kubernetes"
 	"github.com/mvaldes14/nerv/internal/llm"
 	"github.com/mvaldes14/nerv/internal/notify"
+	"github.com/mvaldes14/nerv/internal/remediation"
 	"github.com/mvaldes14/nerv/internal/store"
 	"github.com/mvaldes14/nerv/internal/telemetry"
 )
@@ -62,7 +63,7 @@ func run(args []string) error {
 	}
 	defer shutdownTelemetry(context.Background())
 
-	svc, kubeClient, cleanup, err := buildService(ctx, cfg, logger)
+	svc, remediationSvc, kubeClient, cleanup, err := buildService(ctx, cfg, logger)
 	if err != nil {
 		return err
 	}
@@ -72,24 +73,24 @@ func run(args []string) error {
 	case "ask":
 		return runAsk(args[2:], svc)
 	case "serve":
-		return runServe(ctx, args[2:], cfg, svc, kubeClient, logger)
+		return runServe(ctx, args[2:], cfg, svc, remediationSvc, kubeClient, logger)
 	default:
 		usage()
 		return fmt.Errorf("unknown command %q", args[1])
 	}
 }
 
-func buildService(ctx context.Context, cfg config.Config, logger *slog.Logger) (*investigation.Service, *k8stools.Client, func(), error) {
+func buildService(ctx context.Context, cfg config.Config, logger *slog.Logger) (*investigation.Service, *remediation.Service, *k8stools.Client, func(), error) {
 	postgres, err := store.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	cleanup := func() { postgres.Close() }
 
 	dbosCtx, err := dbos.NewContext(ctx, dbos.Config{DatabaseURL: cfg.DatabaseURL, AppName: "nerv"})
 	if err != nil {
 		cleanup()
-		return nil, nil, nil, fmt.Errorf("create DBOS context: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("create DBOS context: %w", err)
 	}
 
 	var provider investigation.LLM
@@ -159,13 +160,18 @@ func buildService(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 	})
 	if err != nil {
 		cleanup()
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
+	}
+	remediationSvc, err := remediation.NewService(cfg.Remediation, postgres)
+	if err != nil {
+		cleanup()
+		return nil, nil, nil, nil, fmt.Errorf("configure remediation service: %w", err)
 	}
 	if err := dbos.Launch(dbosCtx); err != nil {
 		cleanup()
-		return nil, nil, nil, fmt.Errorf("launch DBOS: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("launch DBOS: %w", err)
 	}
-	return svc, kubeClient, func() {
+	return svc, remediationSvc, kubeClient, func() {
 		dbos.Shutdown(dbosCtx, 10*time.Second)
 		postgres.Close()
 	}, nil
@@ -202,7 +208,7 @@ func runAsk(args []string, svc *investigation.Service) error {
 	return enc.Encode(finding)
 }
 
-func runServe(ctx context.Context, args []string, cfg config.Config, svc *investigation.Service, kubeClient *k8stools.Client, logger *slog.Logger) error {
+func runServe(ctx context.Context, args []string, cfg config.Config, svc *investigation.Service, remediationSvc *remediation.Service, kubeClient *k8stools.Client, logger *slog.Logger) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	addr := fs.String("addr", cfg.Addr, "listen address")
@@ -247,7 +253,7 @@ func runServe(ctx context.Context, args []string, cfg config.Config, svc *invest
 		}
 	}
 
-	handler := api.NewHandler(api.Dependencies{Service: svc, AuthToken: cfg.AuthToken, AskTimeout: cfg.AgentTimeout + 15*time.Second, Logger: logger})
+	handler := api.NewHandler(api.Dependencies{Service: svc, Remediation: remediationSvc, AuthToken: cfg.AuthToken, AskTimeout: cfg.AgentTimeout + 15*time.Second, Logger: logger})
 	srv := &http.Server{Addr: *addr, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	errCh := make(chan error, 1)
 	go func() {

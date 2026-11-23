@@ -194,6 +194,64 @@ CREATE TABLE IF NOT EXISTS nerv.evidence (
     PRIMARY KEY (incident_id, ordinal)
 );
 
+CREATE TABLE IF NOT EXISTS nerv.remediation_proposals (
+    id text PRIMARY KEY,
+    incident_id text NOT NULL REFERENCES nerv.incidents(id) ON DELETE CASCADE,
+    action_kind text NOT NULL CHECK (action_kind = 'set_workload_replicas/v1'),
+    target_id text NOT NULL CHECK (length(target_id) BETWEEN 1 AND 128),
+    target_repository text NOT NULL CHECK (length(target_repository) BETWEEN 3 AND 255),
+    target_path text NOT NULL CHECK (length(target_path) BETWEEN 1 AND 1024),
+    target_resource jsonb NOT NULL CHECK (
+        jsonb_typeof(target_resource) = 'object'
+        AND target_resource->>'api_version' = 'apps/v1'
+        AND target_resource->>'kind' IN ('Deployment', 'StatefulSet')
+    ),
+    expected_state jsonb NOT NULL CHECK (
+        jsonb_typeof(expected_state) = 'object'
+        AND jsonb_typeof(expected_state->'replicas') = 'number'
+        AND (expected_state->>'replicas')::numeric BETWEEN 0 AND 1000
+        AND trunc((expected_state->>'replicas')::numeric) = (expected_state->>'replicas')::numeric
+    ),
+    desired_change jsonb NOT NULL CHECK (
+        jsonb_typeof(desired_change) = 'object'
+        AND jsonb_typeof(desired_change->'replicas') = 'number'
+        AND (desired_change->>'replicas')::numeric BETWEEN 0 AND 1000
+        AND trunc((desired_change->>'replicas')::numeric) = (desired_change->>'replicas')::numeric
+    ),
+    summary text NOT NULL CHECK (length(summary) BETWEEN 1 AND 200),
+    rationale text NOT NULL CHECK (length(rationale) BETWEEN 1 AND 4000),
+    risk_level text NOT NULL CHECK (risk_level IN ('low', 'medium', 'high')),
+    risk_detail text NOT NULL CHECK (length(risk_detail) BETWEEN 1 AND 2000),
+    rendered_before text NOT NULL,
+    rendered_after text NOT NULL,
+    rendered_diff text NOT NULL,
+    render_format text NOT NULL CHECK (render_format = 'manifest_projection/v1'),
+    status text NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'expired')),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    expires_at timestamptz NOT NULL,
+    decision_actor text,
+    decision_auth_subject text,
+    decision_comment text,
+    decision_at timestamptz,
+    CHECK (expires_at > created_at),
+    CHECK (expected_state->>'replicas' <> desired_change->>'replicas'),
+    CHECK ((status IN ('approved', 'rejected')) = (decision_at IS NOT NULL AND decision_actor IS NOT NULL AND decision_auth_subject IS NOT NULL)),
+    CHECK (decision_actor IS NULL OR length(decision_actor) BETWEEN 1 AND 200),
+    CHECK (decision_auth_subject IS NULL OR decision_auth_subject = 'shared-bearer'),
+    CHECK (decision_comment IS NULL OR length(decision_comment) <= 2000)
+);
+
+CREATE TABLE IF NOT EXISTS nerv.remediation_proposal_evidence (
+    proposal_id text NOT NULL REFERENCES nerv.remediation_proposals(id) ON DELETE CASCADE,
+    ordinal integer NOT NULL CHECK (ordinal >= 0 AND ordinal < 20),
+    incident_evidence_ordinal integer NOT NULL CHECK (incident_evidence_ordinal >= 0),
+    source text NOT NULL,
+    summary text NOT NULL,
+    PRIMARY KEY (proposal_id, ordinal),
+    UNIQUE (proposal_id, incident_evidence_ordinal)
+);
+
 CREATE TABLE IF NOT EXISTS nerv.findings (
     incident_id text PRIMARY KEY REFERENCES nerv.incidents(id) ON DELETE CASCADE,
     workflow_id text NOT NULL,
@@ -268,6 +326,9 @@ ALTER TABLE nerv.findings ADD COLUMN IF NOT EXISTS tools_used jsonb NOT NULL DEF
 ALTER TABLE nerv.findings ADD COLUMN IF NOT EXISTS budget jsonb NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE INDEX IF NOT EXISTS incidents_status_updated_idx ON nerv.incidents(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS remediation_proposals_incident_created_idx ON nerv.remediation_proposals(incident_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS remediation_proposals_pending_expiry_idx ON nerv.remediation_proposals(expires_at) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS remediation_proposal_evidence_proposal_idx ON nerv.remediation_proposal_evidence(proposal_id, ordinal);
 CREATE INDEX IF NOT EXISTS findings_created_at_idx ON nerv.findings(created_at);
 CREATE INDEX IF NOT EXISTS incident_correlations_incident_idx ON nerv.incident_correlations(incident_id);
 CREATE INDEX IF NOT EXISTS notification_attempts_incident_idx ON nerv.notification_attempts(incident_id, attempted_at DESC);

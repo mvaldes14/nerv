@@ -216,6 +216,8 @@
     evidence.append(evidenceList);
     detail.append(evidence);
 
+    detail.append(renderRemediation(data.remediation_proposals || []));
+
     const notifications = section('Notification state');
     if (!data.notifications?.length) {
       notifications.append(text('p', 'No notification attempts recorded.', 'status-line'));
@@ -230,11 +232,113 @@
     detail.append(notifications);
   }
 
+  function renderRemediation(proposals) {
+    const remediation = section('GitOps remediation proposals');
+    remediation.append(text('p', 'Approval records intent only. This NERV increment does not write Git, GitHub, Flux, or Kubernetes.', 'status-line'));
+    if (!proposals.length) {
+      remediation.append(text('p', 'No remediation proposals recorded.', 'status-line'));
+      return remediation;
+    }
+    for (const proposal of proposals) {
+      const card = document.createElement('div');
+      card.className = 'proposal';
+      const heading = document.createElement('div');
+      heading.className = 'section-heading';
+      heading.append(text('strong', proposal.summary), badge(proposal.status, proposal.status !== 'approved'));
+      card.append(heading);
+      const resource = proposal.target_resource || {};
+      const facts = document.createElement('div');
+      facts.className = 'decision-grid';
+      facts.append(
+        fact('Repository', proposal.target_repository),
+        fact('Path', proposal.target_path),
+        fact('Resource', [resource.api_version, resource.kind, resource.namespace, resource.name].filter(Boolean).join(' / ')),
+        fact('Replica change', `${proposal.expected_state?.replicas ?? '?'} → ${proposal.desired_change?.replicas ?? '?'}`),
+        fact('Risk', `${proposal.risk_level}: ${proposal.risk_detail}`),
+        fact('Expires', formatTime(proposal.expires_at)),
+        fact('Reviewer', proposal.decision_actor || 'Pending'),
+        fact('Review comment', proposal.decision_comment || 'Not recorded'),
+        fact('Decision auth subject', proposal.decision_auth_subject || 'Not recorded'),
+        fact('Decision time', formatTime(proposal.decision_at))
+      );
+      card.append(facts, fact('Rationale', proposal.rationale));
+
+      const snapshots = document.createElement('div');
+      snapshots.className = 'evidence';
+      for (const item of proposal.evidence || []) {
+        const node = document.createElement('div');
+        node.className = 'evidence-item';
+        node.append(text('strong', `Evidence ${item.incident_evidence_ordinal}: ${item.source}`), text('p', item.summary));
+        snapshots.append(node);
+      }
+      card.append(text('h4', 'Evidence snapshots'), snapshots);
+
+      const diff = text('pre', proposal.rendered_diff, 'diff');
+      card.append(text('h4', `Rendered diff (${proposal.render_format})`), diff);
+
+      if (proposal.status === 'pending' && new Date(proposal.expires_at).valueOf() > Date.now()) {
+        const form = document.createElement('form');
+        form.className = 'proposal-decision';
+        const actor = document.createElement('input');
+        actor.name = 'actor';
+        actor.required = true;
+        actor.maxLength = 200;
+        actor.placeholder = 'Reviewer name';
+        actor.setAttribute('aria-label', 'Reviewer name');
+        const comment = document.createElement('textarea');
+        comment.name = 'comment';
+        comment.maxLength = 2000;
+        comment.rows = 2;
+        comment.placeholder = 'Decision comment';
+        comment.setAttribute('aria-label', 'Decision comment');
+        const approve = text('button', 'Approve');
+        approve.type = 'button';
+        const reject = text('button', 'Reject', 'secondary');
+        reject.type = 'button';
+        const status = text('span', '', 'status-line');
+        const decide = async (decision) => {
+          const reviewer = actor.value.trim();
+          if (!reviewer) {
+            status.textContent = 'Reviewer name is required.';
+            status.className = 'status-line error';
+            return;
+          }
+          if (decision === 'approve' && !window.confirm('Approve this durable remediation proposal? No repository or cluster change will occur.')) return;
+          approve.disabled = true;
+          reject.disabled = true;
+          status.textContent = `${decision === 'approve' ? 'Approving' : 'Rejecting'}…`;
+          try {
+            await api(`/remediation-proposals/${encodeURIComponent(proposal.id)}/${decision}`, {
+              method: 'POST',
+              body: JSON.stringify({actor: reviewer, comment: comment.value.trim()})
+            });
+            await loadDetail(selectedID);
+          } catch (error) {
+            status.textContent = error.message;
+            status.className = 'status-line error';
+            approve.disabled = false;
+            reject.disabled = false;
+          }
+        };
+        approve.addEventListener('click', () => decide('approve'));
+        reject.addEventListener('click', () => decide('reject'));
+        form.append(actor, comment, approve, reject, status);
+        card.append(form);
+      }
+      remediation.append(card);
+    }
+    return remediation;
+  }
+
   async function loadDetail(id) {
     selectedID = id;
     detail.replaceChildren(text('p', 'Loading investigation…', 'status-line'));
     try {
-      const data = await api(`/investigations/${encodeURIComponent(id)}`);
+      const [data, proposals] = await Promise.all([
+        api(`/investigations/${encodeURIComponent(id)}`),
+        api(`/investigations/${encodeURIComponent(id)}/remediation-proposals`)
+      ]);
+      data.remediation_proposals = proposals.items || [];
       renderDetail(data);
       for (const button of list.querySelectorAll('.incident')) button.classList.toggle('active', button.dataset.incidentId === id);
     } catch (error) {

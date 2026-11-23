@@ -49,6 +49,25 @@ func TestLoadRejectsUnsafeAgentConfiguration(t *testing.T) {
 	}
 }
 
+func TestLoadGitOpsTargets(t *testing.T) {
+	t.Setenv("NERV_GITOPS_REPOSITORY", "mvaldes14/k8s-apps")
+	t.Setenv("NERV_GITOPS_TARGETS_JSON", `[{"id":"checkout","path":"apps/checkout.yaml","resource":{"api_version":"apps/v1","kind":"Deployment","namespace":"apps","name":"checkout"}}]`)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Remediation.Repository != "mvaldes14/k8s-apps" || len(cfg.Remediation.Targets) != 1 {
+		t.Fatalf("remediation config = %+v", cfg.Remediation)
+	}
+}
+
+func TestLoadRejectsPartialGitOpsConfiguration(t *testing.T) {
+	t.Setenv("NERV_GITOPS_REPOSITORY", "mvaldes14/k8s-apps")
+	if _, err := Load(); err == nil {
+		t.Fatal("partial GitOps configuration accepted")
+	}
+}
+
 func TestLoadRejectsFallbackEqualToPrimary(t *testing.T) {
 	t.Setenv("NERV_LLM_MODEL", "same")
 	t.Setenv("NERV_LLM_FALLBACK_MODEL", "same")

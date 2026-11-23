@@ -21,6 +21,8 @@ NERV reads configuration from environment variables. The Kubernetes manifests lo
 | `NERV_GOTIFY_TOKEN` | empty | Gotify application token |
 | `NERV_NOTIFICATION_DEBOUNCE` | `2m` | Quiet period before one digest is sent for a burst of autonomous detector incidents |
 | `NERV_HTTP_TIMEOUT` | `30s` | General outbound HTTP timeout |
+| `NERV_GITOPS_REPOSITORY` | empty | Trusted `owner/repository` copied into remediation proposals; configure with targets |
+| `NERV_GITOPS_TARGETS_JSON` | empty | Trusted target allowlist containing IDs, relative YAML paths, and exact apps/v1 workload identities |
 | `NERV_AGENT_MAX_ROUNDS` | `4` | Maximum model rounds per investigation |
 | `NERV_AGENT_MAX_TOOL_CALLS` | `6` | Maximum requested tool calls; rejected calls consume budget |
 | `NERV_AGENT_TIMEOUT` | `75s` | Total agent-loop wall-clock budget |
@@ -54,6 +56,17 @@ NERV reads configuration from environment variables. The Kubernetes manifests lo
 | `OTEL_EXPORTER_OTLP_INSECURE` | `true` | Use plaintext OTLP gRPC |
 
 Agent and admission limits must be positive and within built-in safety caps. Startup fails on invalid values. Configure both price variables together; configuring a per-investigation or daily cost ceiling without both prices also fails startup. When prices are absent, token limits still apply and findings report cost accounting as `unknown_disabled` rather than inventing a cost.
+
+## GitOps remediation proposal configuration
+
+Both GitOps variables must be empty (feature disabled) or configured together. Target IDs must be unique. Paths must be clean relative `.yaml` or `.yml` paths: absolute paths, `..`, backslashes, and empty path segments are rejected. Resources are limited to `apps/v1` `Deployment` and `StatefulSet` identities.
+
+```bash
+NERV_GITOPS_REPOSITORY=mvaldes14/k8s-apps
+NERV_GITOPS_TARGETS_JSON='[{"id":"checkout","path":"apps/checkout/deployment.yaml","resource":{"api_version":"apps/v1","kind":"Deployment","namespace":"apps","name":"checkout"}}]'
+```
+
+Requests select only configured `target_id`; repository, path, resource identity, raw patches, commands, URLs, file content, and caller-rendered diffs are never accepted. This increment stores deterministic manifest projections, unified diffs, evidence snapshots, and approval/rejection state in PostgreSQL. Approval creates no GitHub PR and performs no Git, Flux, or Kubernetes operation. GitHub App integration is deferred.
 
 ## Durable admission behavior
 

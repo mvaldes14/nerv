@@ -35,6 +35,9 @@ data:
   NERV_GOTIFY_URL: "http://gotify-svc.gotify.svc.cluster.local"
   NERV_NOTIFICATION_DEBOUNCE: "2m"
   NERV_HTTP_TIMEOUT: "30s"
+  # Empty pair disables GitOps proposal creation until an overlay supplies trusted targets.
+  NERV_GITOPS_REPOSITORY: ""
+  NERV_GITOPS_TARGETS_JSON: ""
   NERV_DETECTION_ENABLED: "true"
   NERV_DETECTION_PERSISTENCE: "2m"
   NERV_DETECTION_COOLDOWN: "30m"

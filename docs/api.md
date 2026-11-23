@@ -204,13 +204,58 @@ Evidence/tool output is returned separately from finding and is explicitly execu
 
 For `suppress`, NERV does not call Agentgateway. It persists a human-readable policy outcome with the reason and available provider/request metadata, and the UI labels it **Policy outcome** rather than model-generated output. A remote `duplicate` classification does not prove that another incident exists. Only PostgreSQL/DBOS correlation can reuse an incident, and NERV never fabricates an incident link from decision metadata.
 
+## GitOps remediation proposals
+
+All remediation routes use existing bearer authentication. Proposals are linked to completed incidents with findings and copy selected evidence into immutable snapshots. Only configured targets and `set_workload_replicas/v1` are accepted.
+
+### `POST /investigations/{id}/remediation-proposals`
+
+```json
+{
+  "action_kind": "set_workload_replicas/v1",
+  "target_id": "checkout",
+  "expected": {"replicas": 2},
+  "desired": {"replicas": 4},
+  "summary": "Scale checkout for sustained load",
+  "rationale": "Persisted metrics show saturation.",
+  "risk": {"level": "medium", "detail": "Higher resource use."},
+  "evidence_ordinals": [0, 2],
+  "ttl_seconds": 86400
+}
+```
+
+Unknown fields are rejected. Replica values must be 0 through 1000 and differ. At least one valid evidence ordinal is required. TTL defaults to 24 hours and must be 5 minutes through 7 days. Repository, path, resource, patch, command, shell, kubectl, URL, file content, and rendered diff fields are not accepted.
+
+Returns `201` with trusted repository/path/resource, evidence snapshots, deterministic `manifest_projection/v1` before/after text, unified diff, and `pending` status.
+
+### `GET /investigations/{id}/remediation-proposals`
+
+Returns up to 50 proposals newest first:
+
+```json
+{"items": []}
+```
+
+### `GET /remediation-proposals/{id}`
+
+Returns one proposal. Reads lazily persist `expired` when database time reaches `expires_at`.
+
+### `POST /remediation-proposals/{id}/approve`
+### `POST /remediation-proposals/{id}/reject`
+
+```json
+{"actor":"alice","comment":"Reviewed evidence and target."}
+```
+
+One atomic transition from `pending` wins. Terminal or expired proposals return `409`; missing proposals return `404`. `decision_auth_subject` is persisted as `shared-bearer`. Approval and rejection only update PostgreSQL state. This increment has no Git/GitHub client, repository write, Flux operation, Kubernetes mutation, or unattended executor. GitHub App PR creation is deferred.
+
 ## Operator UI
 
 ### `GET /ui/`
 
 Serves the embedded server-rendered shell, CSS, and minimal vanilla JavaScript from the same Go binary. Enter the bearer token in the UI; it is stored only in browser `sessionStorage` with a 30-minute expiry and sent in the `Authorization` header for `/ask` and investigation API requests. It is never inserted into HTML, JavaScript, URLs, or server logs.
 
-The UI talks only to NERV HTTP endpoints. It has no direct PostgreSQL, Kubernetes, SigNoz, or ClickHouse access. Richer filtering, Gotify deep links, and remediation approval controls are deferred.
+The UI talks only to NERV HTTP endpoints. It has no direct PostgreSQL, Kubernetes, SigNoz, or ClickHouse access. Incident detail displays remediation target, risk, evidence snapshots, expiry/reviewer metadata, deterministic diff, and approval controls. Approval requires explicit browser confirmation and still records state only.
 
 ## Errors
 
@@ -224,9 +269,10 @@ Common status codes:
 
 | Status | Meaning |
 | --- | --- |
-| `400` | Invalid JSON, missing question, or empty alert list |
+| `400` | Invalid JSON, validation failure, missing question, or empty alert list |
 | `401` | Missing or invalid bearer token |
-| `404` | Investigation ID not found |
+| `404` | Investigation or remediation proposal ID not found |
+| `409` | Incident not completed with finding, or remediation proposal expired/terminal |
 | `429` | Durable rate, concurrency, daily token, or daily spend limit rejected new work; response includes `Retry-After` |
 | `500` | Investigation failed while `/ask` was waiting |
 | `503` | Alert could not be durably accepted, or readiness failed |

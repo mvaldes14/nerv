@@ -8,7 +8,7 @@
 
 NERV runs inside a cluster, accepts questions and alerts, autonomously detects sustained Kubernetes failures, gathers evidence, and records each investigation in PostgreSQL. DBOS checkpoints the workflow so it can resume after a restart instead of repeating completed work.
 
-NERV is read-only. It can inspect workloads and notify an operator, but it cannot change cluster resources.
+NERV is read-only. It can inspect workloads, notify an operator, and durably record human-approved GitOps remediation proposals, but it cannot change repositories or cluster resources.
 
 ## How it works
 
@@ -96,6 +96,10 @@ The local environment uses the echo provider unless you configure cluster AI ser
 | `POST /alert` | Durably accept alerts and return workflow IDs |
 | `GET /investigations` | List incident history with bounded pagination and filters |
 | `GET /investigations/{id}` | Return incident metadata, status, finding, evidence, and notifications |
+| `POST/GET /investigations/{id}/remediation-proposals` | Create or list bounded GitOps remediation proposals |
+| `GET /remediation-proposals/{id}` | Return proposal, evidence snapshots, deterministic projection, and diff |
+| `POST /remediation-proposals/{id}/approve` | Record human approval only |
+| `POST /remediation-proposals/{id}/reject` | Record human rejection only |
 | `GET /ui/` | Embedded operator UI shell (API calls still require bearer authentication) |
 
 Request examples and response fields: [docs/api.md](docs/api.md).
@@ -156,7 +160,8 @@ docs/                 architecture, API, and testing notes
 - API routes require bearer authentication when `NERV_AUTH_TOKEN` is set. Configure it for every private or shared deployment.
 - Operator UI stores bearer token in per-tab `sessionStorage` with a 30-minute expiry; token is never embedded in served HTML or JavaScript.
 - NERV has no public ingress in the base manifests.
-- Remediation is deferred until investigation quality and approval controls are tested.
+- Remediation approval only changes PostgreSQL state. No Git/GitHub client, repository write, Flux action, Kubernetes mutation, shell, command, or write RBAC exists.
+- GitHub App PR creation is explicitly deferred to a later increment.
 
 Gotify, PostgreSQL, and NERV share the cluster failure domain. A total cluster outage needs an external monitor and an out-of-band notification path.
 
