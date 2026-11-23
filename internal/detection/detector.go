@@ -16,6 +16,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/mvaldes14/nerv/internal/investigation"
+	"github.com/mvaldes14/nerv/internal/telemetry"
 )
 
 type Acceptor interface {
@@ -177,8 +178,11 @@ func (d *Detector) enqueue(kind string, obj any) {
 		return
 	}
 	if !d.queue.Enqueue(kind + ":" + key) {
+		telemetry.RecordDetectorQueue(context.Background(), "dropped", d.queue.Depth(), d.queue.Capacity(), 0)
 		d.logger.Warn("autonomous detection queue full; later informer resync will reconcile state", "kind", kind, "resource", key)
+		return
 	}
+	telemetry.RecordDetectorQueue(context.Background(), "enqueued", d.queue.Depth(), d.queue.Capacity(), 0)
 }
 
 func (d *Detector) enqueueStore(kind string, informer cache.SharedIndexInformer) {
@@ -189,10 +193,11 @@ func (d *Detector) enqueueStore(kind string, informer cache.SharedIndexInformer)
 
 func (d *Detector) worker(ctx context.Context) {
 	for {
-		key, ok := d.queue.Next(ctx)
+		key, wait, ok := d.queue.Next(ctx)
 		if !ok {
 			return
 		}
+		telemetry.RecordDetectorQueue(ctx, "dequeued", d.queue.Depth(), d.queue.Capacity(), wait.Seconds())
 		d.process(ctx, key)
 	}
 }
@@ -316,15 +321,20 @@ func splitQueueKey(value string) (kind, namespace, name string, ok bool) {
 	return kind, key[:slash], key[slash+1:], key[slash+1:] != ""
 }
 
+type queuedItem struct {
+	key        string
+	enqueuedAt time.Time
+}
+
 type boundedQueue struct {
-	items   chan string
+	items   chan queuedItem
 	mu      sync.Mutex
 	pending map[string]struct{}
 	closed  bool
 }
 
 func newBoundedQueue(capacity int) *boundedQueue {
-	return &boundedQueue{items: make(chan string, capacity), pending: make(map[string]struct{})}
+	return &boundedQueue{items: make(chan queuedItem, capacity), pending: make(map[string]struct{})}
 }
 
 func (q *boundedQueue) Enqueue(key string) bool {
@@ -337,7 +347,7 @@ func (q *boundedQueue) Enqueue(key string) bool {
 		return true
 	}
 	select {
-	case q.items <- key:
+	case q.items <- queuedItem{key: key, enqueuedAt: time.Now()}:
 		q.pending[key] = struct{}{}
 		return true
 	default:
@@ -345,20 +355,24 @@ func (q *boundedQueue) Enqueue(key string) bool {
 	}
 }
 
-func (q *boundedQueue) Next(ctx context.Context) (string, bool) {
+func (q *boundedQueue) Next(ctx context.Context) (string, time.Duration, bool) {
 	select {
 	case <-ctx.Done():
-		return "", false
-	case key, ok := <-q.items:
+		return "", 0, false
+	case item, ok := <-q.items:
 		if !ok {
-			return "", false
+			return "", 0, false
 		}
 		q.mu.Lock()
-		delete(q.pending, key)
+		delete(q.pending, item.key)
 		q.mu.Unlock()
-		return key, true
+		return item.key, time.Since(item.enqueuedAt), true
 	}
 }
+
+func (q *boundedQueue) Depth() int { return len(q.items) }
+
+func (q *boundedQueue) Capacity() int { return cap(q.items) }
 
 func (q *boundedQueue) Close() {
 	q.mu.Lock()

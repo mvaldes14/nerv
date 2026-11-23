@@ -49,6 +49,24 @@ func TestDetectorNamespaceAllowlistFiltersEventsBeforeQueueing(t *testing.T) {
 	}
 }
 
+func TestBoundedQueueReportsDepthCapacityAndWait(t *testing.T) {
+	queue := newBoundedQueue(1)
+	if !queue.Enqueue("pod:nerv/one") {
+		t.Fatal("first enqueue rejected")
+	}
+	if queue.Enqueue("pod:nerv/two") {
+		t.Fatal("full queue accepted second key")
+	}
+	if queue.Depth() != 1 || queue.Capacity() != 1 {
+		t.Fatalf("depth/capacity = %d/%d", queue.Depth(), queue.Capacity())
+	}
+	time.Sleep(time.Millisecond)
+	key, wait, ok := queue.Next(context.Background())
+	if !ok || key != "pod:nerv/one" || wait <= 0 {
+		t.Fatalf("Next() = key %q wait %s ok %v", key, wait, ok)
+	}
+}
+
 func TestDetectorStartupReconciliationTriggersOneCrashLoopInvestigation(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "broken", Namespace: "default"},

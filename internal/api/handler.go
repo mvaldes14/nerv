@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -99,6 +100,9 @@ func (h *Handler) ask(w http.ResponseWriter, r *http.Request) {
 	finding, err := h.service.Ask(ctx, req)
 	if err != nil {
 		h.logger.Warn("ask failed", "error", err)
+		if writeAdmissionError(w, err) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -123,6 +127,9 @@ func (h *Handler) alert(w http.ResponseWriter, r *http.Request) {
 		item, err := h.service.Accept(r.Context(), req)
 		if err != nil {
 			h.logger.Error("alert acceptance failed", "error", err, "fingerprint", alert.Fingerprint)
+			if writeAdmissionError(w, err) {
+				return
+			}
 			writeError(w, http.StatusServiceUnavailable, "failed to durably accept alert")
 			return
 		}
@@ -191,6 +198,17 @@ func queryInt(r *http.Request, name string) (int, error) {
 		return 0, fmt.Errorf("%s must be an integer", name)
 	}
 	return parsed, nil
+}
+
+func writeAdmissionError(w http.ResponseWriter, err error) bool {
+	var denied *investigation.AdmissionError
+	if !errors.As(err, &denied) {
+		return false
+	}
+	retrySeconds := max(int64((denied.RetryAfter+time.Second-1)/time.Second), 1)
+	w.Header().Set("Retry-After", strconv.FormatInt(retrySeconds, 10))
+	writeError(w, http.StatusTooManyRequests, denied.Reason)
+	return true
 }
 
 func (h *Handler) requireAuth(next http.Handler) http.Handler {

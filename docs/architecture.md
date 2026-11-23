@@ -50,6 +50,12 @@ Operator questions receive a new UUID unless the caller supplies `idempotency_ke
 
 Detector state also suppresses repeated informer updates while a condition remains active. Recovery clears in-memory active state. Completed correlations remain mapped to their incident through the configured cooldown, then may resolve to a new incident ID. Correlations whose workflows are still running remain active, preventing downstream PostgreSQL or AI failures from causing unbounded new work.
 
+## Durable admission control
+
+Before starting a DBOS workflow, NERV serializes admission in PostgreSQL. Fixed UTC-minute counters enforce source-specific intake rates, and expiring workflow leases enforce one global concurrency ceiling across replicas. Existing workflow IDs bypass duplicate accounting. Completed workflows release their lease; abandoned work ages out through a bounded TTL.
+
+Settled finding budgets provide UTC-day token and optional cost totals. New work is denied after the configured daily ceiling. In-flight investigations can create a bounded overshoot equal to global concurrency multiplied by per-investigation budget. HTTP callers receive `429` plus `Retry-After`; detector failures retry through normal informer resync.
+
 ## Autonomous Kubernetes detection
 
 Shared client-go informers watch Pods, Deployments, StatefulSets, and DaemonSets. Initial cache lists provide startup reconciliation; client-go relists and periodic resyncs provide reconnect reconciliation. A bounded, deduplicating queue feeds fixed workers, so event storms cannot create goroutine-per-event or unbounded work.

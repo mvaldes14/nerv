@@ -147,6 +147,15 @@ func buildService(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		AgentProvider:    cfg.LLMProvider,
 		AgentModel:       cfg.LLMModel,
 		IncidentCooldown: cfg.DetectionCooldown,
+		AdmissionPolicy: investigation.AdmissionPolicy{
+			MaxConcurrent:     cfg.AdmissionMaxConcurrent,
+			LeaseTTL:          cfg.AdmissionLeaseTTL,
+			AskPerMinute:      cfg.AdmissionAskPerMinute,
+			AlertPerMinute:    cfg.AdmissionAlertPerMinute,
+			DetectorPerMinute: cfg.AdmissionDetectorPerMinute,
+			DailyMaxTokens:    cfg.AdmissionDailyMaxTokens,
+			DailyMaxCostUSD:   cfg.AdmissionDailyMaxCostUSD,
+		},
 	})
 	if err != nil {
 		cleanup()

@@ -2,6 +2,7 @@ package investigation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -165,6 +166,45 @@ type DecisionEngine interface {
 	Evaluate(ctx context.Context, req Request, evidence []Evidence) (Decision, error)
 }
 
+type AdmissionPolicy struct {
+	MaxConcurrent     int
+	LeaseTTL          time.Duration
+	AskPerMinute      int
+	AlertPerMinute    int
+	DetectorPerMinute int
+	DailyMaxTokens    int
+	DailyMaxCostUSD   float64
+}
+
+func (p AdmissionPolicy) RateLimit(source string) int {
+	switch source {
+	case SourceHTTPAsk, SourceCLI:
+		return p.AskPerMinute
+	case SourceHTTPAlert:
+		return p.AlertPerMinute
+	case SourceKubernetesDetector:
+		return p.DetectorPerMinute
+	default:
+		return p.AlertPerMinute
+	}
+}
+
+type AdmissionSnapshot struct {
+	Active      int
+	DailyTokens int64
+	DailyCost   float64
+	RetryAfter  time.Duration
+}
+
+type AdmissionError struct {
+	Reason     string
+	RetryAfter time.Duration
+}
+
+func (e *AdmissionError) Error() string {
+	return "investigation admission denied: " + e.Reason
+}
+
 type Store interface {
 	Ping(ctx context.Context) error
 	SaveIncident(ctx context.Context, workflowID string, req Request, status string) error
@@ -175,6 +215,8 @@ type Store interface {
 	ListIncidents(ctx context.Context, filter IncidentFilter) (IncidentPage, error)
 	ResolveIncident(ctx context.Context, correlationKey string, cooldown time.Duration) (string, error)
 	ReleaseIncident(ctx context.Context, correlationKey, incidentID string) error
+	AdmitInvestigation(ctx context.Context, workflowID, source string, policy AdmissionPolicy) (AdmissionSnapshot, error)
+	ReleaseInvestigation(ctx context.Context, workflowID string) (int, error)
 }
 
 type Notifier interface {
@@ -193,6 +235,7 @@ type Dependencies struct {
 	AgentProvider    string
 	AgentModel       string
 	IncidentCooldown time.Duration
+	AdmissionPolicy  AdmissionPolicy
 }
 
 type Service struct {
@@ -207,6 +250,7 @@ type Service struct {
 	agentProvider    string
 	agentModel       string
 	incidentCooldown time.Duration
+	admissionPolicy  AdmissionPolicy
 }
 
 func NewService(deps Dependencies) (*Service, error) {
@@ -229,6 +273,10 @@ func NewService(deps Dependencies) (*Service, error) {
 	if budget.MaxRounds == 0 {
 		budget = AgentBudget{MaxRounds: 4, MaxToolCalls: 6, Timeout: 75 * time.Second, MaxTokens: 12000, ToolConcurrency: 2, ModelTimeout: 30 * time.Second, ToolTimeout: 30 * time.Second, MaxEvidenceBytes: 32 * 1024}
 	}
+	admission := deps.AdmissionPolicy
+	if admission.MaxConcurrent == 0 {
+		admission = AdmissionPolicy{MaxConcurrent: 2, LeaseTTL: 10 * time.Minute, AskPerMinute: 6, AlertPerMinute: 30, DetectorPerMinute: 30, DailyMaxTokens: 240000}
+	}
 	s := &Service{
 		dbos:             deps.DBOS,
 		llm:              deps.LLM,
@@ -241,6 +289,7 @@ func NewService(deps Dependencies) (*Service, error) {
 		agentProvider:    deps.AgentProvider,
 		agentModel:       deps.AgentModel,
 		incidentCooldown: deps.IncidentCooldown,
+		admissionPolicy:  admission,
 	}
 	dbos.RegisterWorkflow(deps.DBOS, s.Investigate,
 		dbos.WithInstance(s),
@@ -270,6 +319,19 @@ func (s *Service) Accept(ctx context.Context, req Request) (Accepted, error) {
 		}
 	}
 	workflowID := workflowID(req)
+	snapshot, err := s.store.AdmitInvestigation(ctx, workflowID, req.Source, s.admissionPolicy)
+	if err != nil {
+		if req.IdempotencyKey != "" {
+			_ = s.store.ReleaseIncident(ctx, req.IdempotencyKey, req.ID)
+		}
+		var denied *AdmissionError
+		if errors.As(err, &denied) {
+			telemetry.RecordAdmission(ctx, req.Source, "denied", denied.Reason, snapshot.Active, s.admissionPolicy.MaxConcurrent, snapshot.DailyTokens, s.admissionPolicy.DailyMaxTokens, snapshot.DailyCost, s.admissionPolicy.DailyMaxCostUSD)
+			return Accepted{}, denied
+		}
+		return Accepted{}, fmt.Errorf("admit investigation: %w", err)
+	}
+	telemetry.RecordAdmission(ctx, req.Source, "accepted", "", snapshot.Active, s.admissionPolicy.MaxConcurrent, snapshot.DailyTokens, s.admissionPolicy.DailyMaxTokens, snapshot.DailyCost, s.admissionPolicy.DailyMaxCostUSD)
 	handle, err := dbos.RunWorkflow(s.dbos, s.Investigate, req,
 		dbos.WithRunInstance(s),
 		dbos.WithWorkflowID(workflowID),
@@ -279,6 +341,7 @@ func (s *Service) Accept(ctx context.Context, req Request) (Accepted, error) {
 		}),
 	)
 	if err != nil {
+		_, _ = s.store.ReleaseInvestigation(ctx, workflowID)
 		if req.IdempotencyKey != "" {
 			_ = s.store.ReleaseIncident(ctx, req.IdempotencyKey, req.ID)
 		}
@@ -451,6 +514,17 @@ func (s *Service) Investigate(ctx dbos.Context, req Request) (finding Finding, w
 	_, err = dbos.RunAsStep(ctx, func(stepCtx context.Context) (string, error) {
 		return "completed", s.store.SetStatus(stepCtx, req.ID, "completed")
 	}, dbos.WithStepName("complete-incident"), dbos.WithStepMaxRetries(3))
+	if err != nil {
+		return Finding{}, err
+	}
+
+	_, err = dbos.RunAsStep(ctx, func(stepCtx context.Context) (string, error) {
+		active, releaseErr := s.store.ReleaseInvestigation(stepCtx, workflowID)
+		if releaseErr == nil {
+			telemetry.RecordAdmissionActive(stepCtx, active, s.admissionPolicy.MaxConcurrent)
+		}
+		return "released", releaseErr
+	}, dbos.WithStepName("release-admission-lease"), dbos.WithStepMaxRetries(3))
 	if err != nil {
 		return Finding{}, err
 	}

@@ -43,6 +43,121 @@ func (p *Postgres) Close() { p.pool.Close() }
 
 func (p *Postgres) Ping(ctx context.Context) error { return p.pool.Ping(ctx) }
 
+func (p *Postgres) AdmitInvestigation(ctx context.Context, workflowID, source string, policy investigation.AdmissionPolicy) (investigation.AdmissionSnapshot, error) {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return investigation.AdmissionSnapshot{}, fmt.Errorf("begin admission transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('nerv-investigation-admission'))`); err != nil {
+		return investigation.AdmissionSnapshot{}, fmt.Errorf("lock investigation admission: %w", err)
+	}
+
+	now := time.Now().UTC()
+	if _, err := tx.Exec(ctx, `DELETE FROM nerv.investigation_rate_windows WHERE window_start < $1`, now.Add(-48*time.Hour)); err != nil {
+		return investigation.AdmissionSnapshot{}, fmt.Errorf("prune investigation rate windows: %w", err)
+	}
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	var snapshot investigation.AdmissionSnapshot
+	if err := tx.QueryRow(ctx, `
+SELECT
+    count(*) FILTER (WHERE released_at IS NULL AND expires_at > $1),
+    COALESCE((SELECT sum(CASE WHEN budget->>'total_tokens' ~ '^[0-9]+$' THEN (budget->>'total_tokens')::bigint ELSE 0 END)
+              FROM nerv.findings WHERE created_at >= $2), 0),
+    COALESCE((SELECT sum(CASE WHEN budget->>'cost_usd' ~ '^[0-9]+([.][0-9]+)?$' THEN (budget->>'cost_usd')::double precision ELSE 0 END)
+              FROM nerv.findings WHERE created_at >= $2), 0)
+FROM nerv.investigation_admission_leases`, now, dayStart).Scan(&snapshot.Active, &snapshot.DailyTokens, &snapshot.DailyCost); err != nil {
+		return investigation.AdmissionSnapshot{}, fmt.Errorf("read investigation admission usage: %w", err)
+	}
+
+	var releasedAt *time.Time
+	var expiresAt time.Time
+	err = tx.QueryRow(ctx, `SELECT expires_at, released_at FROM nerv.investigation_admission_leases WHERE workflow_id = $1`, workflowID).Scan(&expiresAt, &releasedAt)
+	if err == nil && (releasedAt != nil || expiresAt.After(now)) {
+		if err := tx.Commit(ctx); err != nil {
+			return investigation.AdmissionSnapshot{}, fmt.Errorf("commit idempotent investigation admission: %w", err)
+		}
+		return snapshot, nil
+	}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return investigation.AdmissionSnapshot{}, fmt.Errorf("read existing investigation admission: %w", err)
+	}
+	existing := err == nil
+
+	deny := func(reason string, retryAfter time.Duration) (investigation.AdmissionSnapshot, error) {
+		if retryAfter < time.Second {
+			retryAfter = time.Second
+		}
+		snapshot.RetryAfter = retryAfter
+		return snapshot, &investigation.AdmissionError{Reason: reason, RetryAfter: retryAfter}
+	}
+	if policy.DailyMaxTokens > 0 && snapshot.DailyTokens >= int64(policy.DailyMaxTokens) {
+		return deny("daily_token_limit", dayStart.Add(24*time.Hour).Sub(now))
+	}
+	if policy.DailyMaxCostUSD > 0 && snapshot.DailyCost >= policy.DailyMaxCostUSD {
+		return deny("daily_cost_limit", dayStart.Add(24*time.Hour).Sub(now))
+	}
+	if snapshot.Active >= policy.MaxConcurrent {
+		var nextExpiry time.Time
+		if err := tx.QueryRow(ctx, `SELECT min(expires_at) FROM nerv.investigation_admission_leases WHERE released_at IS NULL AND expires_at > $1`, now).Scan(&nextExpiry); err != nil {
+			return investigation.AdmissionSnapshot{}, fmt.Errorf("read next admission lease expiry: %w", err)
+		}
+		return deny("concurrency_limit", nextExpiry.Sub(now))
+	}
+
+	windowStart := now.Truncate(time.Minute)
+	limit := policy.RateLimit(source)
+	var accepted int
+	err = tx.QueryRow(ctx, `SELECT accepted FROM nerv.investigation_rate_windows WHERE source = $1 AND window_start = $2`, source, windowStart).Scan(&accepted)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return investigation.AdmissionSnapshot{}, fmt.Errorf("read investigation rate window: %w", err)
+	}
+	if !existing && accepted >= limit {
+		return deny("rate_limit", windowStart.Add(time.Minute).Sub(now))
+	}
+	if !existing {
+		if _, err := tx.Exec(ctx, `
+INSERT INTO nerv.investigation_rate_windows (source, window_start, accepted, updated_at)
+VALUES ($1, $2, 1, now())
+ON CONFLICT (source, window_start) DO UPDATE SET accepted = nerv.investigation_rate_windows.accepted + 1, updated_at = now()`, source, windowStart); err != nil {
+			return investigation.AdmissionSnapshot{}, fmt.Errorf("increment investigation rate window: %w", err)
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+INSERT INTO nerv.investigation_admission_leases (workflow_id, source, admitted_at, expires_at, released_at)
+VALUES ($1, $2, $3, $4, NULL)
+ON CONFLICT (workflow_id) DO UPDATE SET source = EXCLUDED.source, admitted_at = EXCLUDED.admitted_at, expires_at = EXCLUDED.expires_at, released_at = NULL`, workflowID, source, now, now.Add(policy.LeaseTTL)); err != nil {
+		return investigation.AdmissionSnapshot{}, fmt.Errorf("save investigation admission lease: %w", err)
+	}
+	snapshot.Active++
+	if err := tx.Commit(ctx); err != nil {
+		return investigation.AdmissionSnapshot{}, fmt.Errorf("commit investigation admission: %w", err)
+	}
+	return snapshot, nil
+}
+
+func (p *Postgres) ReleaseInvestigation(ctx context.Context, workflowID string) (int, error) {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin admission release transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('nerv-investigation-admission'))`); err != nil {
+		return 0, fmt.Errorf("lock investigation admission release: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE nerv.investigation_admission_leases SET released_at = now() WHERE workflow_id = $1 AND released_at IS NULL`, workflowID); err != nil {
+		return 0, fmt.Errorf("release investigation admission lease: %w", err)
+	}
+	var active int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM nerv.investigation_admission_leases WHERE released_at IS NULL AND expires_at > now()`).Scan(&active); err != nil {
+		return 0, fmt.Errorf("count active investigation admission leases: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit investigation admission release: %w", err)
+	}
+	return active, nil
+}
+
 func (p *Postgres) migrate(ctx context.Context) error {
 	conn, err := p.pool.Acquire(ctx)
 	if err != nil {
@@ -130,6 +245,22 @@ CREATE TABLE IF NOT EXISTS nerv.notification_batch_items (
     PRIMARY KEY (batch_id, incident_id)
 );
 
+CREATE TABLE IF NOT EXISTS nerv.investigation_admission_leases (
+    workflow_id text PRIMARY KEY,
+    source text NOT NULL,
+    admitted_at timestamptz NOT NULL DEFAULT now(),
+    expires_at timestamptz NOT NULL,
+    released_at timestamptz
+);
+
+CREATE TABLE IF NOT EXISTS nerv.investigation_rate_windows (
+    source text NOT NULL,
+    window_start timestamptz NOT NULL,
+    accepted integer NOT NULL DEFAULT 0,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (source, window_start)
+);
+
 ALTER TABLE nerv.findings ADD COLUMN IF NOT EXISTS confidence text NOT NULL DEFAULT 'unknown';
 ALTER TABLE nerv.findings ADD COLUMN IF NOT EXISTS uncertainty jsonb NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE nerv.findings ADD COLUMN IF NOT EXISTS recommended_action text NOT NULL DEFAULT '';
@@ -137,10 +268,13 @@ ALTER TABLE nerv.findings ADD COLUMN IF NOT EXISTS tools_used jsonb NOT NULL DEF
 ALTER TABLE nerv.findings ADD COLUMN IF NOT EXISTS budget jsonb NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE INDEX IF NOT EXISTS incidents_status_updated_idx ON nerv.incidents(status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS findings_created_at_idx ON nerv.findings(created_at);
 CREATE INDEX IF NOT EXISTS incident_correlations_incident_idx ON nerv.incident_correlations(incident_id);
 CREATE INDEX IF NOT EXISTS notification_attempts_incident_idx ON nerv.notification_attempts(incident_id, attempted_at DESC);
 CREATE INDEX IF NOT EXISTS notification_batches_pending_idx ON nerv.notification_batches(sink, state, created_at);
 CREATE INDEX IF NOT EXISTS notification_batch_items_batch_idx ON nerv.notification_batch_items(batch_id, created_at);
+CREATE INDEX IF NOT EXISTS investigation_admission_active_idx ON nerv.investigation_admission_leases(expires_at) WHERE released_at IS NULL;
+CREATE INDEX IF NOT EXISTS investigation_rate_windows_start_idx ON nerv.investigation_rate_windows(window_start);
 `
 	if _, err := conn.Exec(ctx, migration); err != nil {
 		return fmt.Errorf("migrate NERV schema: %w", err)

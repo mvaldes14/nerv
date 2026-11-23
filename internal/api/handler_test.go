@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mvaldes14/nerv/internal/detection"
 	"github.com/mvaldes14/nerv/internal/investigation"
@@ -16,6 +17,8 @@ import (
 type fakeInvestigationService struct {
 	askRequest investigation.Request
 	askFinding investigation.Finding
+	askErr     error
+	acceptErr  error
 	listFilter investigation.IncidentFilter
 	page       investigation.IncidentPage
 	detail     investigation.Investigation
@@ -24,10 +27,10 @@ type fakeInvestigationService struct {
 func (f *fakeInvestigationService) Ready(context.Context) error { return nil }
 func (f *fakeInvestigationService) Ask(_ context.Context, req investigation.Request) (investigation.Finding, error) {
 	f.askRequest = req
-	return f.askFinding, nil
+	return f.askFinding, f.askErr
 }
 func (f *fakeInvestigationService) Accept(context.Context, investigation.Request) (investigation.Accepted, error) {
-	return investigation.Accepted{}, nil
+	return investigation.Accepted{}, f.acceptErr
 }
 func (f *fakeInvestigationService) Get(context.Context, string) (investigation.Investigation, error) {
 	return f.detail, nil
@@ -74,6 +77,24 @@ func TestAskSetsExplicitOperatorSource(t *testing.T) {
 	}
 	if service.askRequest.Source != investigation.SourceHTTPAsk {
 		t.Fatalf("source = %q, want %q", service.askRequest.Source, investigation.SourceHTTPAsk)
+	}
+}
+
+func TestAskReturnsRateLimitWithRetryAfter(t *testing.T) {
+	service := &fakeInvestigationService{askErr: &investigation.AdmissionError{Reason: "concurrency_limit", RetryAfter: 1500 * time.Millisecond}}
+	handler := NewHandler(Dependencies{Service: service})
+	req := httptest.NewRequest(http.MethodPost, "/ask", bytes.NewBufferString(`{"question":"is vault running?"}`))
+	req.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d: %s", response.Code, http.StatusTooManyRequests, response.Body.String())
+	}
+	if got := response.Header().Get("Retry-After"); got != "2" {
+		t.Fatalf("Retry-After = %q, want 2", got)
+	}
+	if !strings.Contains(response.Body.String(), "concurrency_limit") {
+		t.Fatalf("body = %s", response.Body.String())
 	}
 }
 
