@@ -133,6 +133,19 @@ func TestRemediationProposalPersistenceQueryAndStateTransitions(t *testing.T) {
 	if _, err := service.Reject(context.Background(), created.ID, remediation.DecisionRequest{Actor: "bob"}, "shared-bearer"); !errors.Is(err, remediation.ErrConflict) {
 		t.Fatalf("terminal transition error = %v", err)
 	}
+	submitting, err := postgres.BeginProposalSubmission(context.Background(), created.ID)
+	if err != nil || submitting.SubmissionStatus != remediation.SubmissionSubmitting {
+		t.Fatalf("begin submission = %+v, %v", submitting, err)
+	}
+	submitted, err := postgres.CompleteProposalSubmission(context.Background(), created.ID, remediation.SubmissionResult{
+		Branch: "nerv/remediation-test", CommitSHA: "abc123", PullRequestNumber: 108, PullRequestURL: "https://github.test/pr/108",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if submitted.SubmissionStatus != remediation.SubmissionSubmitted || submitted.PullRequestNumber != 108 || submitted.PullRequestURL == "" || submitted.SubmittedAt == nil {
+		t.Fatalf("submitted proposal = %+v", submitted)
+	}
 }
 
 func TestRemediationProposalExpiresLazilyAndCannotTransition(t *testing.T) {

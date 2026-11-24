@@ -234,6 +234,13 @@ CREATE TABLE IF NOT EXISTS nerv.remediation_proposals (
     decision_auth_subject text,
     decision_comment text,
     decision_at timestamptz,
+    submission_status text NOT NULL DEFAULT 'not_submitted' CHECK (submission_status IN ('not_submitted', 'submitting', 'submitted', 'failed')),
+    submission_branch text,
+    submission_commit_sha text,
+    pull_request_number integer,
+    pull_request_url text,
+    submission_error text,
+    submitted_at timestamptz,
     CHECK (expires_at > created_at),
     CHECK (expected_state->>'replicas' <> desired_change->>'replicas'),
     CHECK ((status IN ('approved', 'rejected')) = (decision_at IS NOT NULL AND decision_actor IS NOT NULL AND decision_auth_subject IS NOT NULL)),
@@ -324,6 +331,13 @@ ALTER TABLE nerv.findings ADD COLUMN IF NOT EXISTS uncertainty jsonb NOT NULL DE
 ALTER TABLE nerv.findings ADD COLUMN IF NOT EXISTS recommended_action text NOT NULL DEFAULT '';
 ALTER TABLE nerv.findings ADD COLUMN IF NOT EXISTS tools_used jsonb NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE nerv.findings ADD COLUMN IF NOT EXISTS budget jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE nerv.remediation_proposals ADD COLUMN IF NOT EXISTS submission_status text NOT NULL DEFAULT 'not_submitted';
+ALTER TABLE nerv.remediation_proposals ADD COLUMN IF NOT EXISTS submission_branch text;
+ALTER TABLE nerv.remediation_proposals ADD COLUMN IF NOT EXISTS submission_commit_sha text;
+ALTER TABLE nerv.remediation_proposals ADD COLUMN IF NOT EXISTS pull_request_number integer;
+ALTER TABLE nerv.remediation_proposals ADD COLUMN IF NOT EXISTS pull_request_url text;
+ALTER TABLE nerv.remediation_proposals ADD COLUMN IF NOT EXISTS submission_error text;
+ALTER TABLE nerv.remediation_proposals ADD COLUMN IF NOT EXISTS submitted_at timestamptz;
 
 CREATE INDEX IF NOT EXISTS incidents_status_updated_idx ON nerv.incidents(status, updated_at DESC);
 CREATE INDEX IF NOT EXISTS remediation_proposals_incident_created_idx ON nerv.remediation_proposals(incident_id, created_at DESC);

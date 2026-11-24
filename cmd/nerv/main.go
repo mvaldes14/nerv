@@ -19,6 +19,7 @@ import (
 	"github.com/mvaldes14/nerv/internal/config"
 	"github.com/mvaldes14/nerv/internal/decision"
 	"github.com/mvaldes14/nerv/internal/detection"
+	"github.com/mvaldes14/nerv/internal/githubapp"
 	"github.com/mvaldes14/nerv/internal/investigation"
 	k8stools "github.com/mvaldes14/nerv/internal/kubernetes"
 	"github.com/mvaldes14/nerv/internal/llm"
@@ -162,7 +163,16 @@ func buildService(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		cleanup()
 		return nil, nil, nil, nil, err
 	}
-	remediationSvc, err := remediation.NewService(cfg.Remediation, postgres)
+	var remediationSubmitter remediation.Submitter
+	if cfg.GitHubApp.AppID != "" {
+		githubClient, githubErr := githubapp.New(cfg.GitHubApp)
+		if githubErr != nil {
+			cleanup()
+			return nil, nil, nil, nil, fmt.Errorf("configure GitHub App client: %w", githubErr)
+		}
+		remediationSubmitter = githubClient
+	}
+	remediationSvc, err := remediation.NewService(cfg.Remediation, postgres, remediationSubmitter)
 	if err != nil {
 		cleanup()
 		return nil, nil, nil, nil, fmt.Errorf("configure remediation service: %w", err)

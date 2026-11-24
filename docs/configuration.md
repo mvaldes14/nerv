@@ -23,6 +23,11 @@ NERV reads configuration from environment variables. The Kubernetes manifests lo
 | `NERV_HTTP_TIMEOUT` | `30s` | General outbound HTTP timeout |
 | `NERV_GITOPS_REPOSITORY` | empty | Trusted `owner/repository` copied into remediation proposals; configure with targets |
 | `NERV_GITOPS_TARGETS_JSON` | empty | Trusted target allowlist containing IDs, relative YAML paths, and exact apps/v1 workload identities |
+| `NERV_GITHUB_APP_ID` | empty | GitHub App ID; configure together with installation ID and private key |
+| `NERV_GITHUB_APP_INSTALLATION_ID` | empty | Installation ID scoped to the trusted repository |
+| `NERV_GITHUB_APP_PRIVATE_KEY` | empty | RSA private key PEM; secret value supplied through Vault/ESO |
+| `NERV_GITHUB_BASE_BRANCH` | `main` | Base branch used for remediation pull requests |
+| `NERV_GITHUB_API_URL` | `https://api.github.com` | GitHub REST API endpoint |
 | `NERV_AGENT_MAX_ROUNDS` | `4` | Maximum model rounds per investigation |
 | `NERV_AGENT_MAX_TOOL_CALLS` | `6` | Maximum requested tool calls; rejected calls consume budget |
 | `NERV_AGENT_TIMEOUT` | `75s` | Total agent-loop wall-clock budget |
@@ -64,9 +69,13 @@ Both GitOps variables must be empty (feature disabled) or configured together. T
 ```bash
 NERV_GITOPS_REPOSITORY=mvaldes14/k8s-apps
 NERV_GITOPS_TARGETS_JSON='[{"id":"checkout","path":"apps/checkout/deployment.yaml","resource":{"api_version":"apps/v1","kind":"Deployment","namespace":"apps","name":"checkout"}}]'
+NERV_GITHUB_APP_ID=5905005
+NERV_GITHUB_APP_INSTALLATION_ID=185399975
+NERV_GITHUB_APP_PRIVATE_KEY='-----BEGIN RSA PRIVATE KEY-----...'
+NERV_GITHUB_BASE_BRANCH=main
 ```
 
-Requests select only configured `target_id`; repository, path, resource identity, raw patches, commands, URLs, file content, and caller-rendered diffs are never accepted. This increment stores deterministic manifest projections, unified diffs, evidence snapshots, and approval/rejection state in PostgreSQL. Approval creates no GitHub PR and performs no Git, Flux, or Kubernetes operation. GitHub App integration is deferred.
+Requests select only configured `target_id`; repository, path, resource identity, raw patches, commands, URLs, file content, and caller-rendered diffs are never accepted. Proposals store deterministic manifest projections, unified diffs, evidence snapshots, and approval/rejection state in PostgreSQL. Approval alone changes only PostgreSQL state. An explicit submit action then verifies the base-branch manifest still matches `expected_state`, creates a deterministic branch, changes only the allowlisted resource's `spec.replicas`, commits, and opens a pull request. NERV cannot merge the PR and retains read-only Kubernetes RBAC.
 
 ## Durable admission behavior
 

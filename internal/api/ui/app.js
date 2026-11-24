@@ -234,7 +234,7 @@
 
   function renderRemediation(proposals) {
     const remediation = section('GitOps remediation proposals');
-    remediation.append(text('p', 'Approval records intent only. This NERV increment does not write Git, GitHub, Flux, or Kubernetes.', 'status-line'));
+    remediation.append(text('p', 'Approval authorizes explicit GitHub PR submission. NERV never merges PRs or mutates Kubernetes directly.', 'status-line'));
     if (!proposals.length) {
       remediation.append(text('p', 'No remediation proposals recorded.', 'status-line'));
       return remediation;
@@ -259,7 +259,9 @@
         fact('Reviewer', proposal.decision_actor || 'Pending'),
         fact('Review comment', proposal.decision_comment || 'Not recorded'),
         fact('Decision auth subject', proposal.decision_auth_subject || 'Not recorded'),
-        fact('Decision time', formatTime(proposal.decision_at))
+        fact('Decision time', formatTime(proposal.decision_at)),
+        fact('PR submission', proposal.submission_status || 'not_submitted'),
+        fact('Pull request', proposal.pull_request_url || 'Not created')
       );
       card.append(facts, fact('Rationale', proposal.rationale));
 
@@ -303,7 +305,7 @@
             status.className = 'status-line error';
             return;
           }
-          if (decision === 'approve' && !window.confirm('Approve this durable remediation proposal? No repository or cluster change will occur.')) return;
+          if (decision === 'approve' && !window.confirm('Approve this durable remediation proposal? Approval alone creates no repository or cluster change.')) return;
           approve.disabled = true;
           reject.disabled = true;
           status.textContent = `${decision === 'approve' ? 'Approving' : 'Rejecting'}…`;
@@ -324,6 +326,37 @@
         reject.addEventListener('click', () => decide('reject'));
         form.append(actor, comment, approve, reject, status);
         card.append(form);
+      }
+      if (proposal.status === 'approved' && proposal.submission_status !== 'submitted' && proposal.submission_status !== 'submitting') {
+        const submit = text('button', proposal.submission_status === 'failed' ? 'Retry PR submission' : 'Submit GitHub PR');
+        submit.type = 'button';
+        const status = text('span', proposal.submission_error || '', proposal.submission_error ? 'status-line error' : 'status-line');
+        submit.addEventListener('click', async () => {
+          if (!window.confirm('Create a Git branch, commit, and pull request for this approved proposal? NERV will not merge it.')) return;
+          submit.disabled = true;
+          status.textContent = 'Submitting GitHub PR…';
+          status.className = 'status-line';
+          try {
+            await api(`/remediation-proposals/${encodeURIComponent(proposal.id)}/submit`, {method: 'POST'});
+            await loadDetail(selectedID);
+          } catch (error) {
+            status.textContent = error.message;
+            status.className = 'status-line error';
+            submit.disabled = false;
+          }
+        });
+        const controls = document.createElement('div');
+        controls.className = 'proposal-decision';
+        controls.append(submit, status);
+        card.append(controls);
+      }
+      if (proposal.pull_request_url) {
+        const link = document.createElement('a');
+        link.href = proposal.pull_request_url;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = `Open PR #${proposal.pull_request_number}`;
+        card.append(link);
       }
       remediation.append(card);
     }

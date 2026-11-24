@@ -34,6 +34,7 @@ type remediationService interface {
 	Get(context.Context, string) (remediation.Proposal, error)
 	Approve(context.Context, string, remediation.DecisionRequest, string) (remediation.Proposal, error)
 	Reject(context.Context, string, remediation.DecisionRequest, string) (remediation.Proposal, error)
+	Submit(context.Context, string) (remediation.Proposal, error)
 }
 
 type Dependencies struct {
@@ -83,6 +84,7 @@ func (h *Handler) routes() {
 	h.mux.Handle("GET /remediation-proposals/{id}", h.requireAuth(http.HandlerFunc(h.getRemediationProposal)))
 	h.mux.Handle("POST /remediation-proposals/{id}/approve", h.requireAuth(http.HandlerFunc(h.approveRemediationProposal)))
 	h.mux.Handle("POST /remediation-proposals/{id}/reject", h.requireAuth(http.HandlerFunc(h.rejectRemediationProposal)))
+	h.mux.Handle("POST /remediation-proposals/{id}/submit", h.requireAuth(http.HandlerFunc(h.submitRemediationProposal)))
 }
 
 func (h *Handler) health(w http.ResponseWriter, _ *http.Request) {
@@ -277,6 +279,19 @@ func (h *Handler) decideRemediationProposal(w http.ResponseWriter, r *http.Reque
 	} else {
 		proposal, err = h.remediation.Reject(r.Context(), r.PathValue("id"), req, "shared-bearer")
 	}
+	if err != nil {
+		h.writeRemediationError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, proposal)
+}
+
+func (h *Handler) submitRemediationProposal(w http.ResponseWriter, r *http.Request) {
+	if h.remediation == nil {
+		writeError(w, http.StatusServiceUnavailable, "remediation service unavailable")
+		return
+	}
+	proposal, err := h.remediation.Submit(r.Context(), r.PathValue("id"))
 	if err != nil {
 		h.writeRemediationError(w, err)
 		return

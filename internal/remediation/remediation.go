@@ -25,6 +25,11 @@ const (
 	StatusRejected = "rejected"
 	StatusExpired  = "expired"
 
+	SubmissionNotSubmitted = "not_submitted"
+	SubmissionSubmitting   = "submitting"
+	SubmissionSubmitted    = "submitted"
+	SubmissionFailed       = "failed"
+
 	DefaultTTL = 24 * time.Hour
 	MinTTL     = 5 * time.Minute
 	MaxTTL     = 7 * 24 * time.Hour
@@ -215,6 +220,28 @@ type Evidence struct {
 	Summary                 string `json:"summary"`
 }
 
+type SubmissionRequest struct {
+	ProposalID       string
+	Repository       string
+	Path             string
+	Resource         Resource
+	ExpectedReplicas int
+	DesiredReplicas  int
+	Summary          string
+	Rationale        string
+}
+
+type SubmissionResult struct {
+	Branch            string
+	CommitSHA         string
+	PullRequestNumber int
+	PullRequestURL    string
+}
+
+type Submitter interface {
+	Submit(context.Context, SubmissionRequest) (SubmissionResult, error)
+}
+
 type Proposal struct {
 	ID                  string       `json:"id"`
 	IncidentID          string       `json:"incident_id"`
@@ -241,6 +268,13 @@ type Proposal struct {
 	DecisionAuthSubject string       `json:"decision_auth_subject,omitempty"`
 	DecisionComment     string       `json:"decision_comment,omitempty"`
 	DecisionAt          *time.Time   `json:"decision_at,omitempty"`
+	SubmissionStatus    string       `json:"submission_status"`
+	SubmissionBranch    string       `json:"submission_branch,omitempty"`
+	SubmissionCommitSHA string       `json:"submission_commit_sha,omitempty"`
+	PullRequestNumber   int          `json:"pull_request_number,omitempty"`
+	PullRequestURL      string       `json:"pull_request_url,omitempty"`
+	SubmissionError     string       `json:"submission_error,omitempty"`
+	SubmittedAt         *time.Time   `json:"submitted_at,omitempty"`
 	Evidence            []Evidence   `json:"evidence"`
 }
 
@@ -249,15 +283,19 @@ type Store interface {
 	ListProposals(ctx context.Context, incidentID string, limit int) ([]Proposal, error)
 	GetProposal(ctx context.Context, proposalID string) (Proposal, error)
 	DecideProposal(ctx context.Context, proposalID, status, actor, authSubject, comment string) (Proposal, error)
+	BeginProposalSubmission(ctx context.Context, proposalID string) (Proposal, error)
+	CompleteProposalSubmission(ctx context.Context, proposalID string, result SubmissionResult) (Proposal, error)
+	FailProposalSubmission(ctx context.Context, proposalID, message string) error
 }
 
 type Service struct {
-	config  Config
-	targets map[string]Target
-	store   Store
+	config    Config
+	targets   map[string]Target
+	store     Store
+	submitter Submitter
 }
 
-func NewService(config Config, store Store) (*Service, error) {
+func NewService(config Config, store Store, submitters ...Submitter) (*Service, error) {
 	if store == nil {
 		return nil, errors.New("remediation store is required")
 	}
@@ -268,7 +306,11 @@ func NewService(config Config, store Store) (*Service, error) {
 	for _, target := range config.Targets {
 		targets[target.ID] = target
 	}
-	return &Service{config: config, targets: targets, store: store}, nil
+	var submitter Submitter
+	if len(submitters) > 0 {
+		submitter = submitters[0]
+	}
+	return &Service{config: config, targets: targets, store: store, submitter: submitter}, nil
 }
 
 func (s *Service) Create(ctx context.Context, incidentID string, req CreateRequest) (Proposal, error) {
@@ -349,6 +391,50 @@ func (s *Service) Approve(ctx context.Context, proposalID string, req DecisionRe
 
 func (s *Service) Reject(ctx context.Context, proposalID string, req DecisionRequest, authSubject string) (Proposal, error) {
 	return s.decide(ctx, proposalID, StatusRejected, req, authSubject)
+}
+
+func (s *Service) Submit(ctx context.Context, proposalID string) (Proposal, error) {
+	ctx, span := tracer.Start(ctx, "remediation.submit")
+	defer span.End()
+	if s.submitter == nil {
+		err := invalid("GitHub App submission is not configured")
+		recordError(span, err)
+		return Proposal{}, err
+	}
+	existing, err := s.store.GetProposal(ctx, proposalID)
+	if err != nil {
+		recordError(span, err)
+		return Proposal{}, err
+	}
+	if existing.SubmissionStatus == SubmissionSubmitted {
+		return existing, nil
+	}
+	proposal, err := s.store.BeginProposalSubmission(ctx, proposalID)
+	if err != nil {
+		recordError(span, err)
+		return Proposal{}, err
+	}
+	result, err := s.submitter.Submit(ctx, SubmissionRequest{
+		ProposalID: proposal.ID, Repository: proposal.TargetRepository, Path: proposal.TargetPath,
+		Resource: proposal.TargetResource, ExpectedReplicas: proposal.ExpectedState.Replicas,
+		DesiredReplicas: proposal.DesiredChange.Replicas, Summary: proposal.Summary, Rationale: proposal.Rationale,
+	})
+	if err != nil {
+		message := err.Error()
+		if len(message) > 2000 {
+			message = message[:2000]
+		}
+		if failErr := s.store.FailProposalSubmission(ctx, proposalID, message); failErr != nil {
+			err = errors.Join(err, failErr)
+		}
+		recordError(span, err)
+		return Proposal{}, err
+	}
+	proposal, err = s.store.CompleteProposalSubmission(ctx, proposalID, result)
+	if err != nil {
+		recordError(span, err)
+	}
+	return proposal, err
 }
 
 func (s *Service) decide(ctx context.Context, proposalID, status string, req DecisionRequest, authSubject string) (Proposal, error) {
