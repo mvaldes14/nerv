@@ -50,6 +50,11 @@ func (f *fakeStore) FailProposalSubmission(_ context.Context, _ string, message 
 	f.failed = message
 	return nil
 }
+func (f *fakeStore) UpdateProposalPullRequestStatus(_ context.Context, _ string, status PullRequestStatus) (Proposal, error) {
+	f.proposal.PullRequestState = status.State
+	f.proposal.PullRequestMerged = status.Merged
+	return f.proposal, nil
+}
 
 type fakeSubmitter struct {
 	request SubmissionRequest
@@ -60,6 +65,9 @@ type fakeSubmitter struct {
 func (f *fakeSubmitter) Submit(_ context.Context, request SubmissionRequest) (SubmissionResult, error) {
 	f.request = request
 	return f.result, f.err
+}
+func (f *fakeSubmitter) PullRequestStatus(context.Context, string, int) (PullRequestStatus, error) {
+	return PullRequestStatus{State: "closed"}, f.err
 }
 
 func testConfig() Config {
@@ -245,6 +253,22 @@ func TestSubmitCreatesPullRequestForApprovedProposal(t *testing.T) {
 		t.Fatalf("request = %+v", submitter.request)
 	}
 	if proposal.SubmissionStatus != SubmissionSubmitted || proposal.PullRequestURL == "" {
+		t.Fatalf("proposal = %+v", proposal)
+	}
+}
+
+func TestRefreshPullRequestPersistsClosedState(t *testing.T) {
+	store := &fakeStore{proposal: Proposal{ID: "proposal-1", Status: StatusApproved, SubmissionStatus: SubmissionSubmitted, TargetRepository: "mvaldes14/k8s-apps", PullRequestNumber: 111}}
+	submitter := &fakeSubmitter{}
+	service, err := NewService(testConfig(), store, submitter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal, err := service.RefreshPullRequest(context.Background(), "proposal-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proposal.PullRequestState != "closed" || proposal.PullRequestMerged {
 		t.Fatalf("proposal = %+v", proposal)
 	}
 }

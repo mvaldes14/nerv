@@ -26,6 +26,7 @@ type investigationService interface {
 	Accept(context.Context, investigation.Request) (investigation.Accepted, error)
 	Get(context.Context, string) (investigation.Investigation, error)
 	List(context.Context, investigation.IncidentFilter) (investigation.IncidentPage, error)
+	FilterOptions(context.Context) (investigation.IncidentFilterOptions, error)
 }
 
 type remediationService interface {
@@ -36,6 +37,7 @@ type remediationService interface {
 	Approve(context.Context, string, remediation.DecisionRequest, string) (remediation.Proposal, error)
 	Reject(context.Context, string, remediation.DecisionRequest, string) (remediation.Proposal, error)
 	Submit(context.Context, string) (remediation.Proposal, error)
+	RefreshPullRequest(context.Context, string) (remediation.Proposal, error)
 }
 
 type Dependencies struct {
@@ -80,6 +82,7 @@ func (h *Handler) routes() {
 	h.mux.Handle("POST /ask", h.requireAuth(http.HandlerFunc(h.ask)))
 	h.mux.Handle("POST /alert", h.requireAuth(http.HandlerFunc(h.alert)))
 	h.mux.Handle("GET /investigations", h.requireAuth(http.HandlerFunc(h.listInvestigations)))
+	h.mux.Handle("GET /investigations/filter-options", h.requireAuth(http.HandlerFunc(h.investigationFilterOptions)))
 	h.mux.Handle("GET /investigations/{id}", h.requireAuth(http.HandlerFunc(h.getInvestigation)))
 	h.mux.Handle("POST /investigations/{id}/remediation-proposals", h.requireAuth(http.HandlerFunc(h.createRemediationProposal)))
 	h.mux.Handle("GET /investigations/{id}/remediation-proposals", h.requireAuth(http.HandlerFunc(h.listRemediationProposals)))
@@ -88,6 +91,7 @@ func (h *Handler) routes() {
 	h.mux.Handle("POST /remediation-proposals/{id}/approve", h.requireAuth(http.HandlerFunc(h.approveRemediationProposal)))
 	h.mux.Handle("POST /remediation-proposals/{id}/reject", h.requireAuth(http.HandlerFunc(h.rejectRemediationProposal)))
 	h.mux.Handle("POST /remediation-proposals/{id}/submit", h.requireAuth(http.HandlerFunc(h.submitRemediationProposal)))
+	h.mux.Handle("POST /remediation-proposals/{id}/refresh", h.requireAuth(http.HandlerFunc(h.refreshRemediationPullRequest)))
 }
 
 func (h *Handler) authCheck(w http.ResponseWriter, _ *http.Request) {
@@ -196,6 +200,16 @@ func (h *Handler) listInvestigations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, page)
+}
+
+func (h *Handler) investigationFilterOptions(w http.ResponseWriter, r *http.Request) {
+	options, err := h.service.FilterOptions(r.Context())
+	if err != nil {
+		h.logger.Error("list investigation filter options failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "list investigation filter options failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, options)
 }
 
 func (h *Handler) getInvestigation(w http.ResponseWriter, r *http.Request) {
@@ -312,6 +326,19 @@ func (h *Handler) submitRemediationProposal(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	proposal, err := h.remediation.Submit(r.Context(), r.PathValue("id"))
+	if err != nil {
+		h.writeRemediationError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, proposal)
+}
+
+func (h *Handler) refreshRemediationPullRequest(w http.ResponseWriter, r *http.Request) {
+	if h.remediation == nil {
+		writeError(w, http.StatusServiceUnavailable, "remediation service unavailable")
+		return
+	}
+	proposal, err := h.remediation.RefreshPullRequest(r.Context(), r.PathValue("id"))
 	if err != nil {
 		h.writeRemediationError(w, err)
 		return

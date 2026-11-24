@@ -239,6 +239,11 @@ CREATE TABLE IF NOT EXISTS nerv.remediation_proposals (
     submission_commit_sha text,
     pull_request_number integer,
     pull_request_url text,
+    pull_request_state text,
+    pull_request_merged boolean NOT NULL DEFAULT false,
+    pull_request_checked_at timestamptz,
+    pull_request_closed_at timestamptz,
+    pull_request_merged_at timestamptz,
     submission_error text,
     submitted_at timestamptz,
     CHECK (expires_at > created_at),
@@ -336,6 +341,11 @@ ALTER TABLE nerv.remediation_proposals ADD COLUMN IF NOT EXISTS submission_branc
 ALTER TABLE nerv.remediation_proposals ADD COLUMN IF NOT EXISTS submission_commit_sha text;
 ALTER TABLE nerv.remediation_proposals ADD COLUMN IF NOT EXISTS pull_request_number integer;
 ALTER TABLE nerv.remediation_proposals ADD COLUMN IF NOT EXISTS pull_request_url text;
+ALTER TABLE nerv.remediation_proposals ADD COLUMN IF NOT EXISTS pull_request_state text;
+ALTER TABLE nerv.remediation_proposals ADD COLUMN IF NOT EXISTS pull_request_merged boolean NOT NULL DEFAULT false;
+ALTER TABLE nerv.remediation_proposals ADD COLUMN IF NOT EXISTS pull_request_checked_at timestamptz;
+ALTER TABLE nerv.remediation_proposals ADD COLUMN IF NOT EXISTS pull_request_closed_at timestamptz;
+ALTER TABLE nerv.remediation_proposals ADD COLUMN IF NOT EXISTS pull_request_merged_at timestamptz;
 ALTER TABLE nerv.remediation_proposals ADD COLUMN IF NOT EXISTS submission_error text;
 ALTER TABLE nerv.remediation_proposals ADD COLUMN IF NOT EXISTS submitted_at timestamptz;
 
@@ -647,6 +657,54 @@ func (p *Postgres) ListIncidents(ctx context.Context, filter investigation.Incid
 		return investigation.IncidentPage{}, fmt.Errorf("read incidents: %w", err)
 	}
 	return page, nil
+}
+
+func (p *Postgres) ListIncidentFilterOptions(ctx context.Context) (investigation.IncidentFilterOptions, error) {
+	queries := []struct {
+		name  string
+		query string
+		dest  *[]string
+	}{
+		{name: "sources", query: `SELECT DISTINCT source FROM nerv.incidents WHERE source <> '' ORDER BY source`},
+		{name: "statuses", query: `SELECT DISTINCT status FROM nerv.incidents WHERE status <> '' ORDER BY status`},
+	}
+	options := investigation.IncidentFilterOptions{}
+	queries[0].dest = &options.Sources
+	queries[1].dest = &options.Statuses
+	for _, query := range queries {
+		values, err := p.queryDistinctStrings(ctx, query.query)
+		if err != nil {
+			return investigation.IncidentFilterOptions{}, fmt.Errorf("list incident filter %s: %w", query.name, err)
+		}
+		*query.dest = values
+	}
+	var err error
+	options.Namespaces, err = p.queryDistinctStrings(ctx, `SELECT DISTINCT target->>'namespace' FROM nerv.incidents WHERE COALESCE(target->>'namespace', '') <> '' ORDER BY 1`)
+	if err != nil {
+		return investigation.IncidentFilterOptions{}, fmt.Errorf("list incident filter namespaces: %w", err)
+	}
+	options.Workloads, err = p.queryDistinctStrings(ctx, `SELECT DISTINCT target->>'name' FROM nerv.incidents WHERE COALESCE(target->>'name', '') <> '' ORDER BY 1`)
+	if err != nil {
+		return investigation.IncidentFilterOptions{}, fmt.Errorf("list incident filter workloads: %w", err)
+	}
+	return options, nil
+}
+
+func (p *Postgres) queryDistinctStrings(ctx context.Context, query string) ([]string, error) {
+	rows, err := p.pool.Query(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	values := make([]string, 0)
+	for rows.Next() {
+		var value string
+		if err := rows.Scan(&value); err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	return values, rows.Err()
 }
 
 func incidentListQuery(filter investigation.IncidentFilter) (string, []any) {

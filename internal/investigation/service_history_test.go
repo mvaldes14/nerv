@@ -15,6 +15,10 @@ func (s *historyStore) ListIncidents(_ context.Context, filter IncidentFilter) (
 	return IncidentPage{Limit: filter.Limit, Offset: filter.Offset}, nil
 }
 
+func (s *historyStore) ListIncidentFilterOptions(context.Context) (IncidentFilterOptions, error) {
+	return IncidentFilterOptions{}, nil
+}
+
 func TestListBoundsPaginationAndTrimsFilters(t *testing.T) {
 	store := &historyStore{}
 	service := &Service{store: store}
@@ -42,6 +46,18 @@ func TestListBoundsPaginationAndTrimsFilters(t *testing.T) {
 	}
 	if page.Limit != MaxIncidentLimit || page.Offset != MaxIncidentOffset {
 		t.Fatalf("page bounds = limit %d offset %d", page.Limit, page.Offset)
+	}
+}
+
+func TestFilterOptionsIncludeKnownValues(t *testing.T) {
+	store := &historyStore{}
+	service := &Service{store: store}
+	options, err := service.FilterOptions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(options.Sources) != 4 || options.Sources[0] != SourceHTTPAsk || len(options.Statuses) != 3 {
+		t.Fatalf("options = %+v", options)
 	}
 }
 

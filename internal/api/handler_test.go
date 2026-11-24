@@ -40,6 +40,9 @@ func (f *fakeInvestigationService) List(_ context.Context, filter investigation.
 	f.listFilter = filter
 	return f.page, nil
 }
+func (f *fakeInvestigationService) FilterOptions(context.Context) (investigation.IncidentFilterOptions, error) {
+	return investigation.IncidentFilterOptions{Sources: []string{investigation.SourceHTTPAsk}, Statuses: []string{"completed"}, Namespaces: []string{"nerv"}, Workloads: []string{"nerv"}}, nil
+}
 
 type fakeRemediationService struct {
 	createRequest remediation.CreateRequest
@@ -71,6 +74,9 @@ func (f *fakeRemediationService) Reject(_ context.Context, _ string, req remedia
 	return f.proposal, f.err
 }
 func (f *fakeRemediationService) Submit(context.Context, string) (remediation.Proposal, error) {
+	return f.proposal, f.err
+}
+func (f *fakeRemediationService) RefreshPullRequest(context.Context, string) (remediation.Proposal, error) {
 	return f.proposal, f.err
 }
 
@@ -243,6 +249,28 @@ func TestOperatorUIStartsBehindAuthenticationGate(t *testing.T) {
 	}
 }
 
+func TestOperatorUIUsesConversationAndDropdownFilters(t *testing.T) {
+	handler := NewHandler(Dependencies{Service: &fakeInvestigationService{}})
+	req := httptest.NewRequest(http.MethodGet, "/ui/", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	body := response.Body.String()
+	askStart := strings.Index(body, `id="tab-ask"`)
+	incidentStart := strings.Index(body, `id="tab-incidents"`)
+	if askStart < 0 || incidentStart <= askStart {
+		t.Fatal("tab sections missing")
+	}
+	ask := body[askStart:incidentStart]
+	if strings.Contains(ask, "target-grid") || !strings.Contains(ask, `id="conversation"`) {
+		t.Fatalf("unexpected Ask panel: %s", ask)
+	}
+	for _, name := range []string{"source", "status", "namespace", "workload"} {
+		if !strings.Contains(body, `<select name="`+name+`"`) {
+			t.Errorf("missing %s dropdown", name)
+		}
+	}
+}
+
 func TestAuthCheckAcceptsValidBearerToken(t *testing.T) {
 	handler := NewHandler(Dependencies{Service: &fakeInvestigationService{}, AuthToken: "secret"})
 	req := httptest.NewRequest(http.MethodGet, "/auth/check", nil)
@@ -261,6 +289,7 @@ func TestRemediationRoutesRequireBearerAuthentication(t *testing.T) {
 		path   string
 	}{
 		{method: http.MethodGet, path: "/auth/check"},
+		{method: http.MethodGet, path: "/investigations/filter-options"},
 		{method: http.MethodGet, path: "/remediation-proposals"},
 		{method: http.MethodPost, path: "/investigations/inc-1/remediation-proposals"},
 		{method: http.MethodGet, path: "/investigations/inc-1/remediation-proposals"},
@@ -268,6 +297,7 @@ func TestRemediationRoutesRequireBearerAuthentication(t *testing.T) {
 		{method: http.MethodPost, path: "/remediation-proposals/proposal-1/approve"},
 		{method: http.MethodPost, path: "/remediation-proposals/proposal-1/reject"},
 		{method: http.MethodPost, path: "/remediation-proposals/proposal-1/submit"},
+		{method: http.MethodPost, path: "/remediation-proposals/proposal-1/refresh"},
 	} {
 		t.Run(test.method+" "+test.path, func(t *testing.T) {
 			req := httptest.NewRequest(test.method, test.path, strings.NewReader(`{}`))
@@ -293,10 +323,12 @@ func TestRemediationEndpointsReturnProposalData(t *testing.T) {
 	}{
 		{name: "create", method: http.MethodPost, path: "/investigations/inc-1/remediation-proposals", body: createBody, want: http.StatusCreated},
 		{name: "list", method: http.MethodGet, path: "/investigations/inc-1/remediation-proposals", want: http.StatusOK},
+		{name: "filter-options", method: http.MethodGet, path: "/investigations/filter-options", want: http.StatusOK},
 		{name: "queue", method: http.MethodGet, path: "/remediation-proposals", want: http.StatusOK},
 		{name: "get", method: http.MethodGet, path: "/remediation-proposals/proposal-1", want: http.StatusOK},
 		{name: "reject", method: http.MethodPost, path: "/remediation-proposals/proposal-1/reject", body: `{"actor":"alice","comment":"not now"}`, want: http.StatusOK},
 		{name: "submit", method: http.MethodPost, path: "/remediation-proposals/proposal-1/submit", want: http.StatusOK},
+		{name: "refresh", method: http.MethodPost, path: "/remediation-proposals/proposal-1/refresh", want: http.StatusOK},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -307,7 +339,7 @@ func TestRemediationEndpointsReturnProposalData(t *testing.T) {
 			if response.Code != test.want {
 				t.Fatalf("status = %d, want %d: %s", response.Code, test.want, response.Body.String())
 			}
-			if !strings.Contains(response.Body.String(), "proposal-1") {
+			if test.name != "filter-options" && !strings.Contains(response.Body.String(), "proposal-1") {
 				t.Fatalf("body = %s", response.Body.String())
 			}
 		})

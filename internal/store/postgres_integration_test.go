@@ -44,6 +44,15 @@ func createCompletedIncident(t *testing.T, postgres *Postgres, incidentID string
 	}
 }
 
+func containsString(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
+}
+
 func remediationServiceForTest(t *testing.T, postgres *Postgres) *remediation.Service {
 	t.Helper()
 	service, err := remediation.NewService(remediation.Config{
@@ -152,6 +161,21 @@ func TestRemediationProposalPersistenceQueryAndStateTransitions(t *testing.T) {
 	}
 	if submitted.SubmissionStatus != remediation.SubmissionSubmitted || submitted.PullRequestNumber != 108 || submitted.PullRequestURL == "" || submitted.SubmittedAt == nil {
 		t.Fatalf("submitted proposal = %+v", submitted)
+	}
+	closedAt := time.Now().UTC()
+	tracked, err := postgres.UpdateProposalPullRequestStatus(context.Background(), created.ID, remediation.PullRequestStatus{State: "closed", ClosedAt: &closedAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tracked.PullRequestState != "closed" || tracked.PullRequestMerged || tracked.PullRequestCheckedAt == nil || tracked.PullRequestClosedAt == nil {
+		t.Fatalf("tracked proposal = %+v", tracked)
+	}
+	options, err := postgres.ListIncidentFilterOptions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsString(options.Sources, investigation.SourceHTTPAsk) || !containsString(options.Statuses, "completed") {
+		t.Fatalf("filter options = %+v", options)
 	}
 }
 

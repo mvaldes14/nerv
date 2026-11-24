@@ -52,11 +52,20 @@ button.secondary { color: var(--text); background: #182334; border: 1px solid va
 .auth-form button { grid-row: 2; }
 .target-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 12px; }
 .form-actions { display: flex; align-items: center; gap: 12px; margin-top: 14px; color: var(--muted); }
+.conversation { display: grid; gap: 12px; max-height: 520px; overflow: auto; padding: 4px 2px 18px; }
+.message { max-width: 82%; padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: #0b121d; }
+.message.user { justify-self: end; background: #1a2332; border-color: #3b4b65; }
+.message.assistant { justify-self: start; border-left: 3px solid var(--accent); }
+.message strong { color: var(--accent-2); font-size: .76rem; }
+.message p { margin: 7px 0 0; white-space: pre-wrap; line-height: 1.5; }
+.message button { margin-top: 10px; }
+.conversation-form { padding-top: 18px; border-top: 1px solid var(--line); }
 .workspace { display: grid; grid-template-columns: minmax(330px, .85fr) minmax(480px, 1.5fr); gap: 22px; align-items: start; }
 .history, .detail { padding: 20px; min-height: 580px; }
 .history { position: sticky; top: 100px; }
 .filters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
-.filters input { margin: 0; }
+.filters input, .filters select { margin: 6px 0 0; }
+.filters label { display: block; }
 .incident-list { display: grid; gap: 8px; max-height: 600px; overflow: auto; }
 .incident { width: 100%; text-align: left; color: var(--text); background: #0d1521; border: 1px solid transparent; padding: 13px; }
 .incident:hover, .incident.active { border-color: var(--accent); background: #131e2e; }

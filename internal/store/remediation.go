@@ -17,7 +17,9 @@ expected_state, desired_change, summary, rationale, risk_level, risk_detail, ren
 rendered_after, rendered_diff, render_format, status, created_at, updated_at, expires_at,
 COALESCE(decision_actor, ''), COALESCE(decision_auth_subject, ''), COALESCE(decision_comment, ''), decision_at,
 submission_status, COALESCE(submission_branch, ''), COALESCE(submission_commit_sha, ''),
-COALESCE(pull_request_number, 0), COALESCE(pull_request_url, ''), COALESCE(submission_error, ''), submitted_at`
+COALESCE(pull_request_number, 0), COALESCE(pull_request_url, ''), COALESCE(pull_request_state, ''),
+pull_request_merged, pull_request_checked_at, pull_request_closed_at, pull_request_merged_at,
+COALESCE(submission_error, ''), submitted_at`
 
 func (p *Postgres) CreateProposal(ctx context.Context, proposal remediation.Proposal, evidenceOrdinals []int) (remediation.Proposal, error) {
 	tx, err := p.pool.Begin(ctx)
@@ -279,7 +281,8 @@ func (p *Postgres) CompleteProposalSubmission(ctx context.Context, proposalID st
 	proposal, err := scanProposal(p.pool.QueryRow(ctx, `
 UPDATE nerv.remediation_proposals
 SET submission_status = 'submitted', submission_branch = $2, submission_commit_sha = $3,
-    pull_request_number = $4, pull_request_url = $5, submission_error = NULL,
+    pull_request_number = $4, pull_request_url = $5, pull_request_state = 'open',
+    pull_request_merged = false, pull_request_checked_at = now(), submission_error = NULL,
     submitted_at = now(), updated_at = now()
 WHERE id = $1 AND status = 'approved' AND submission_status = 'submitting'
 RETURNING `+proposalColumns, proposalID, result.Branch, result.CommitSHA, result.PullRequestNumber, result.PullRequestURL))
@@ -288,6 +291,23 @@ RETURNING `+proposalColumns, proposalID, result.Branch, result.CommitSHA, result
 	}
 	if err != nil {
 		return remediation.Proposal{}, fmt.Errorf("complete remediation submission: %w", err)
+	}
+	proposal.Evidence, err = queryProposalEvidence(ctx, p.pool, proposal.ID)
+	return proposal, err
+}
+
+func (p *Postgres) UpdateProposalPullRequestStatus(ctx context.Context, proposalID string, status remediation.PullRequestStatus) (remediation.Proposal, error) {
+	proposal, err := scanProposal(p.pool.QueryRow(ctx, `
+UPDATE nerv.remediation_proposals
+SET pull_request_state = $2, pull_request_merged = $3, pull_request_checked_at = now(),
+    pull_request_closed_at = $4, pull_request_merged_at = $5, updated_at = now()
+WHERE id = $1 AND submission_status = 'submitted'
+RETURNING `+proposalColumns, proposalID, status.State, status.Merged, status.ClosedAt, status.MergedAt))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return remediation.Proposal{}, fmt.Errorf("%w: remediation proposal has no submitted pull request", remediation.ErrConflict)
+	}
+	if err != nil {
+		return remediation.Proposal{}, fmt.Errorf("update remediation pull request status: %w", err)
 	}
 	proposal.Evidence, err = queryProposalEvidence(ctx, p.pool, proposal.ID)
 	return proposal, err
@@ -322,7 +342,9 @@ func scanProposal(row proposalScanner) (remediation.Proposal, error) {
 		&proposal.Status, &proposal.CreatedAt, &proposal.UpdatedAt, &proposal.ExpiresAt,
 		&proposal.DecisionActor, &proposal.DecisionAuthSubject, &proposal.DecisionComment, &proposal.DecisionAt,
 		&proposal.SubmissionStatus, &proposal.SubmissionBranch, &proposal.SubmissionCommitSHA,
-		&proposal.PullRequestNumber, &proposal.PullRequestURL, &proposal.SubmissionError, &proposal.SubmittedAt,
+		&proposal.PullRequestNumber, &proposal.PullRequestURL, &proposal.PullRequestState,
+		&proposal.PullRequestMerged, &proposal.PullRequestCheckedAt, &proposal.PullRequestClosedAt, &proposal.PullRequestMergedAt,
+		&proposal.SubmissionError, &proposal.SubmittedAt,
 	); err != nil {
 		return remediation.Proposal{}, err
 	}

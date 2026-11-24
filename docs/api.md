@@ -125,6 +125,10 @@ NERV derives the incident ID from the alert fingerprint. Replaying the same fing
 
 ## Incident history
 
+### `GET /investigations/filter-options`
+
+Returns known and persisted values for `sources`, `statuses`, `namespaces`, and `workloads`. Operator UI uses these values for dropdown filters.
+
 ### `GET /investigations`
 
 Returns incidents newest first. `limit` defaults to 50 and is capped at 100. `offset` is capped at 10000. Optional exact-match filters are `source`, `status`, `namespace`, and `workload` (target name).
@@ -257,6 +261,10 @@ One atomic transition from `pending` wins. Terminal or expired proposals return 
 
 Requires an approved proposal and configured GitHub App. Submission atomically claims the proposal, reads the allowlisted file from the configured base branch, verifies the exact resource identity and expected replica count, creates a deterministic `nerv/remediation-*` branch, changes only `spec.replicas`, commits, and opens a pull request. The response persists `submission_status`, branch, commit SHA, PR number, and PR URL. Failed submissions persist a bounded error and may be retried. Already-submitted proposals return their existing PR data.
 
+### `POST /remediation-proposals/{id}/refresh`
+
+Polls GitHub for a submitted pull request and persists its open/closed state, merged flag, close/merge timestamps, and last checked time. Operator UI automatically refreshes open PRs when remediation queue loads and also provides a manual refresh action. No webhook is required.
+
 NERV never merges the pull request, pushes to the base branch, calls Flux mutation APIs, or writes Kubernetes resources. Repository drift returns `409` rather than overwriting unexpected state.
 
 ## Operator UI
@@ -265,7 +273,7 @@ NERV never merges the pull request, pushes to the base branch, calls Flux mutati
 
 Serves embedded HTML, CSS, and vanilla JavaScript from the same Go binary. The initial screen is an authentication gate; operator panels remain hidden until `GET /auth/check` validates the bearer token. The token is stored only in browser `sessionStorage` with a 30-minute expiry and is never inserted into HTML, JavaScript, URLs, or server logs. Static UI assets are not a security boundary; every data and mutation API remains bearer-protected.
 
-The authenticated console has separate Ask, Incidents, and Remediation tabs. The remediation queue exposes evidence, deterministic diff, approval/rejection controls, submission status, and PR URL without requiring operators to find the originating incident first. Approval and PR submission require separate explicit browser confirmations. The UI has no direct PostgreSQL, Kubernetes, SigNoz, ClickHouse, Git, or GitHub access.
+The authenticated console has separate Ask, Incidents, and Remediation tabs. Ask presents a conversational browser-session thread with one freeform question field. Each question remains a separate durable investigation; structured targets remain supported by API clients but are not required in operator UI. Incident filters are dropdowns populated from known source/status values and distinct persisted namespaces/workloads. Remediation queue exposes evidence, deterministic diff, approval/rejection controls, submission and PR lifecycle status, and PR URL without requiring operators to find originating incident first. Approval and PR submission require separate explicit browser confirmations. The UI has no direct PostgreSQL, Kubernetes, SigNoz, ClickHouse, Git, or GitHub access.
 
 ## Errors
 
