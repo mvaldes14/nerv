@@ -7,13 +7,15 @@
   const pageSize = 25;
   let offset = 0;
   let hasMore = false;
-  let selectedID = '';
+  let selectedIncidentID = '';
+  let selectedProposalID = '';
+  let activeTab = 'ask';
 
   const $ = (selector) => document.querySelector(selector);
-  const list = $('#incident-list');
-  const detail = $('#detail');
-  const tokenInput = $('#token');
-  const connection = $('#connection');
+  const incidentList = $('#incident-list');
+  const incidentDetail = $('#detail');
+  const remediationList = $('#remediation-list');
+  const remediationDetail = $('#remediation-detail');
 
   function clearToken() {
     sessionStorage.removeItem(tokenKey);
@@ -35,10 +37,29 @@
     sessionStorage.setItem(tokenExpiryKey, String(Date.now() + tokenTTL));
   }
 
-  function setConnection() {
-    const connected = Boolean(token());
-    connection.textContent = connected ? 'Token active for 30 minutes' : 'Token required';
-    connection.className = connected ? 'pill' : 'pill muted';
+  function setAuthenticated(authenticated) {
+    $('#auth-gate').hidden = authenticated;
+    $('#operator-shell').hidden = !authenticated;
+    $('#session-controls').hidden = !authenticated;
+    if (authenticated) $('#connection').textContent = 'Token active for 30 minutes';
+  }
+
+  function resetOperatorState() {
+    activeTab = 'ask';
+    offset = 0;
+    hasMore = false;
+    selectedIncidentID = '';
+    selectedProposalID = '';
+    incidentList.replaceChildren();
+    remediationList.replaceChildren();
+    incidentDetail.replaceChildren(text('p', 'Select an incident after reconnecting.', 'status-line'));
+    remediationDetail.replaceChildren(text('p', 'Select a proposal after reconnecting.', 'status-line'));
+  }
+
+  function lockOperator() {
+    clearToken();
+    resetOperatorState();
+    setAuthenticated(false);
   }
 
   async function api(path, options = {}) {
@@ -55,6 +76,7 @@
       const responseText = await response.text();
       body = {error: responseText || `Unexpected response type: ${contentType || 'unknown'}`};
     }
+    if (response.status === 401) lockOperator();
     if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`);
     return body;
   }
@@ -67,7 +89,7 @@
   }
 
   function formatTime(value) {
-    if (!value) return 'unknown time';
+    if (!value) return 'Not recorded';
     const date = new Date(value);
     return Number.isNaN(date.valueOf()) ? value : date.toLocaleString();
   }
@@ -79,61 +101,6 @@
 
   function badge(value, warning = false) {
     return text('span', value || 'unknown', warning ? 'pill warn' : 'pill');
-  }
-
-  function currentFilters() {
-    const data = new FormData($('#filters'));
-    const params = new URLSearchParams({limit: String(pageSize), offset: String(offset)});
-    for (const name of ['source', 'status', 'namespace', 'workload']) {
-      const value = String(data.get(name) || '').trim();
-      if (value) params.set(name, value);
-    }
-    return params;
-  }
-
-  async function loadIncidents() {
-    const status = $('#list-status');
-    status.textContent = 'Loading incidents…';
-    status.className = 'status-line';
-    list.replaceChildren();
-    try {
-      const page = await api(`/investigations?${currentFilters()}`);
-      hasMore = page.has_more;
-      if (!page.items.length) list.append(text('p', 'No incidents match these filters.', 'status-line'));
-      for (const incident of page.items) list.append(incidentButton(incident));
-      status.textContent = `${page.items.length} incident${page.items.length === 1 ? '' : 's'} loaded`;
-      $('#page-label').textContent = `Showing ${offset + 1}–${offset + page.items.length}`;
-      $('#previous').disabled = offset === 0;
-      $('#next').disabled = !hasMore;
-    } catch (error) {
-      status.textContent = error.message;
-      status.className = 'status-line error';
-      $('#page-label').textContent = '';
-      $('#previous').disabled = true;
-      $('#next').disabled = true;
-    }
-  }
-
-  function incidentButton(incident) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.dataset.incidentId = incident.id;
-    button.className = `incident${incident.id === selectedID ? ' active' : ''}`;
-    const top = document.createElement('div');
-    top.className = 'incident-top';
-    top.append(badge(incident.status, incident.status !== 'completed'), text('span', incident.source, 'meta'));
-    button.append(top, text('strong', incident.question || incident.id));
-    const meta = document.createElement('div');
-    meta.className = 'meta';
-    meta.append(
-      text('span', `ID ${incident.id}`),
-      text('span', targetName(incident.target)),
-      text('span', `Created ${formatTime(incident.created_at)}`),
-      text('span', `Updated ${formatTime(incident.updated_at)}`)
-    );
-    button.append(meta);
-    button.addEventListener('click', () => loadDetail(incident.id));
-    return button;
   }
 
   function fact(label, value) {
@@ -150,21 +117,85 @@
     return node;
   }
 
-  function renderDetail(data) {
+  function activateTab(name) {
+    activeTab = name;
+    for (const button of document.querySelectorAll('.tab')) {
+      const selected = button.dataset.tab === name;
+      button.classList.toggle('active', selected);
+      button.setAttribute('aria-selected', String(selected));
+    }
+    for (const panel of document.querySelectorAll('.tab-panel')) panel.hidden = panel.id !== `tab-${name}`;
+    history.replaceState(null, '', `#${name}`);
+    if (name === 'incidents') loadIncidents();
+    if (name === 'remediation') loadRemediationQueue();
+  }
+
+  function currentFilters() {
+    const data = new FormData($('#filters'));
+    const params = new URLSearchParams({limit: String(pageSize), offset: String(offset)});
+    for (const name of ['source', 'status', 'namespace', 'workload']) {
+      const value = String(data.get(name) || '').trim();
+      if (value) params.set(name, value);
+    }
+    return params;
+  }
+
+  async function loadIncidents() {
+    if (!token()) return;
+    const status = $('#list-status');
+    status.textContent = 'Loading incidents…';
+    status.className = 'status-line';
+    incidentList.replaceChildren();
+    try {
+      const page = await api(`/investigations?${currentFilters()}`);
+      hasMore = page.has_more;
+      if (!page.items.length) incidentList.append(text('p', 'No incidents match these filters.', 'status-line'));
+      for (const incident of page.items) incidentList.append(incidentButton(incident));
+      status.textContent = `${page.items.length} incident${page.items.length === 1 ? '' : 's'} loaded`;
+      $('#page-label').textContent = page.items.length ? `Showing ${offset + 1}–${offset + page.items.length}` : '';
+      $('#previous').disabled = offset === 0;
+      $('#next').disabled = !hasMore;
+    } catch (error) {
+      status.textContent = error.message;
+      status.className = 'status-line error';
+      $('#page-label').textContent = '';
+      $('#previous').disabled = true;
+      $('#next').disabled = true;
+    }
+  }
+
+  function incidentButton(incident) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.dataset.incidentId = incident.id;
+    button.className = `incident${incident.id === selectedIncidentID ? ' active' : ''}`;
+    const top = document.createElement('div');
+    top.className = 'incident-top';
+    top.append(badge(incident.status, incident.status !== 'completed'), text('span', incident.source, 'meta'));
+    button.append(top, text('strong', incident.question || incident.id));
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.append(text('span', targetName(incident.target)), text('span', formatTime(incident.updated_at)));
+    button.append(meta);
+    button.addEventListener('click', () => loadIncidentDetail(incident.id));
+    return button;
+  }
+
+  function renderIncidentDetail(data) {
     const incident = data.incident;
     const finding = data.finding;
-    detail.replaceChildren();
+    incidentDetail.replaceChildren();
     const heading = document.createElement('div');
     heading.className = 'section-heading';
     const title = document.createElement('div');
     title.append(text('p', incident.source, 'eyebrow'), text('h2', incident.question));
     heading.append(title, badge(incident.status, incident.status !== 'completed'));
-    detail.append(heading);
+    incidentDetail.append(heading);
 
     const meta = document.createElement('div');
     meta.className = 'detail-meta';
     meta.append(text('span', `ID ${incident.id}`), text('span', targetName(incident.target)), text('span', `Created ${formatTime(incident.created_at)}`), text('span', `Updated ${formatTime(incident.updated_at)}`));
-    detail.append(meta);
+    incidentDetail.append(meta);
 
     const decision = section('Decision and recommendation');
     const grid = document.createElement('div');
@@ -176,34 +207,16 @@
       fact('Decision request ID', finding?.decision?.request_id || 'Not provided'),
       fact('Confidence', finding?.confidence || 'Unknown / not asserted'),
       fact('Recommended action', finding?.recommended_action || 'Not recorded'),
-      fact('Executed tools', finding?.tools_used?.length ? finding.tools_used.join(', ') : 'None recorded'),
-      fact('Budget stop reason', finding?.budget?.stop_reason || 'Completed within budget'),
       fact('Review required', finding?.decision?.review_required ? 'Yes' : 'No')
     );
     decision.append(grid);
-    detail.append(decision);
+    incidentDetail.append(decision);
 
-    const suppressed = finding?.decision?.action === 'suppress';
-    const outcome = section(suppressed ? 'Policy outcome' : 'Model-generated finding');
+    const outcome = section(finding?.decision?.action === 'suppress' ? 'Policy outcome' : 'Model-generated finding');
     outcome.append(text('div', finding?.answer || 'Finding not available while investigation is running.', 'output'));
-    if (!suppressed) {
-      const modelMeta = document.createElement('div');
-      modelMeta.className = 'detail-meta';
-      modelMeta.append(
-        text('span', `Provider: ${finding?.provider || 'not recorded'}`),
-        text('span', `Model: ${finding?.model || 'not recorded'}`),
-        text('span', `Rounds: ${finding?.budget?.rounds_used ?? 'not recorded'}/${finding?.budget?.max_rounds ?? 'not recorded'}`),
-        text('span', `Tool calls: ${finding?.budget?.tool_calls_used ?? 'not recorded'}/${finding?.budget?.max_tool_calls ?? 'not recorded'}`),
-        text('span', `Tokens: ${finding?.budget?.total_tokens ?? 'not recorded'}/${finding?.budget?.max_tokens ?? 'not recorded'}`)
-      );
-      outcome.append(modelMeta);
-      const uncertainty = finding?.uncertainty?.length ? finding.uncertainty.join(' • ') : 'No structured uncertainty recorded; confidence remains unknown.';
-      outcome.append(fact('Uncertainty', uncertainty));
-    }
-    detail.append(outcome);
+    incidentDetail.append(outcome);
 
     const evidence = section('Evidence and tool output');
-    evidence.append(text('p', 'Persisted source material. Kept separate from policy and model outcomes.', 'status-line'));
     const evidenceList = document.createElement('div');
     evidenceList.className = 'evidence';
     for (const item of data.evidence || []) {
@@ -214,189 +227,218 @@
     }
     if (!evidenceList.childElementCount) evidenceList.append(text('p', 'No evidence persisted yet.', 'status-line'));
     evidence.append(evidenceList);
-    detail.append(evidence);
-
-    detail.append(renderRemediation(data.remediation_proposals || []));
+    incidentDetail.append(evidence);
 
     const notifications = section('Notification state');
-    if (!data.notifications?.length) {
-      notifications.append(text('p', 'No notification attempts recorded.', 'status-line'));
-    } else {
-      for (const attempt of data.notifications) {
-        const node = document.createElement('div');
-        node.className = 'evidence-item';
-        node.append(text('strong', `${attempt.sink}: ${attempt.status}`), text('p', [attempt.external_id, attempt.error, formatTime(attempt.attempted_at)].filter(Boolean).join(' — ')));
-        notifications.append(node);
-      }
+    if (!data.notifications?.length) notifications.append(text('p', 'No notification attempts recorded.', 'status-line'));
+    for (const attempt of data.notifications || []) {
+      const node = document.createElement('div');
+      node.className = 'evidence-item';
+      node.append(text('strong', `${attempt.sink}: ${attempt.status}`), text('p', [attempt.external_id, attempt.error, formatTime(attempt.attempted_at)].filter(Boolean).join(' — ')));
+      notifications.append(node);
     }
-    detail.append(notifications);
+    incidentDetail.append(notifications);
+
+    const remediationLink = section('Remediation');
+    remediationLink.append(text('p', 'Approval and GitHub PR controls live in the Remediation tab.', 'status-line'));
+    const open = text('button', 'Open remediation queue', 'secondary');
+    open.type = 'button';
+    open.addEventListener('click', () => activateTab('remediation'));
+    remediationLink.append(open);
+    incidentDetail.append(remediationLink);
   }
 
-  function renderRemediation(proposals) {
-    const remediation = section('GitOps remediation proposals');
-    remediation.append(text('p', 'Approval authorizes explicit GitHub PR submission. NERV never merges PRs or mutates Kubernetes directly.', 'status-line'));
-    if (!proposals.length) {
-      remediation.append(text('p', 'No remediation proposals recorded.', 'status-line'));
-      return remediation;
-    }
-    for (const proposal of proposals) {
-      const card = document.createElement('div');
-      card.className = 'proposal';
-      const heading = document.createElement('div');
-      heading.className = 'section-heading';
-      heading.append(text('strong', proposal.summary), badge(proposal.status, proposal.status !== 'approved'));
-      card.append(heading);
-      const resource = proposal.target_resource || {};
-      const facts = document.createElement('div');
-      facts.className = 'decision-grid';
-      facts.append(
-        fact('Repository', proposal.target_repository),
-        fact('Path', proposal.target_path),
-        fact('Resource', [resource.api_version, resource.kind, resource.namespace, resource.name].filter(Boolean).join(' / ')),
-        fact('Replica change', `${proposal.expected_state?.replicas ?? '?'} → ${proposal.desired_change?.replicas ?? '?'}`),
-        fact('Risk', `${proposal.risk_level}: ${proposal.risk_detail}`),
-        fact('Expires', formatTime(proposal.expires_at)),
-        fact('Reviewer', proposal.decision_actor || 'Pending'),
-        fact('Review comment', proposal.decision_comment || 'Not recorded'),
-        fact('Decision auth subject', proposal.decision_auth_subject || 'Not recorded'),
-        fact('Decision time', formatTime(proposal.decision_at)),
-        fact('PR submission', proposal.submission_status || 'not_submitted'),
-        fact('Pull request', proposal.pull_request_url || 'Not created')
-      );
-      card.append(facts, fact('Rationale', proposal.rationale));
-
-      const snapshots = document.createElement('div');
-      snapshots.className = 'evidence';
-      for (const item of proposal.evidence || []) {
-        const node = document.createElement('div');
-        node.className = 'evidence-item';
-        node.append(text('strong', `Evidence ${item.incident_evidence_ordinal}: ${item.source}`), text('p', item.summary));
-        snapshots.append(node);
-      }
-      card.append(text('h4', 'Evidence snapshots'), snapshots);
-
-      const diff = text('pre', proposal.rendered_diff, 'diff');
-      card.append(text('h4', `Rendered diff (${proposal.render_format})`), diff);
-
-      if (proposal.status === 'pending' && new Date(proposal.expires_at).valueOf() > Date.now()) {
-        const form = document.createElement('form');
-        form.className = 'proposal-decision';
-        const actor = document.createElement('input');
-        actor.name = 'actor';
-        actor.required = true;
-        actor.maxLength = 200;
-        actor.placeholder = 'Reviewer name';
-        actor.setAttribute('aria-label', 'Reviewer name');
-        const comment = document.createElement('textarea');
-        comment.name = 'comment';
-        comment.maxLength = 2000;
-        comment.rows = 2;
-        comment.placeholder = 'Decision comment';
-        comment.setAttribute('aria-label', 'Decision comment');
-        const approve = text('button', 'Approve');
-        approve.type = 'button';
-        const reject = text('button', 'Reject', 'secondary');
-        reject.type = 'button';
-        const status = text('span', '', 'status-line');
-        const decide = async (decision) => {
-          const reviewer = actor.value.trim();
-          if (!reviewer) {
-            status.textContent = 'Reviewer name is required.';
-            status.className = 'status-line error';
-            return;
-          }
-          if (decision === 'approve' && !window.confirm('Approve this durable remediation proposal? Approval alone creates no repository or cluster change.')) return;
-          approve.disabled = true;
-          reject.disabled = true;
-          status.textContent = `${decision === 'approve' ? 'Approving' : 'Rejecting'}…`;
-          try {
-            await api(`/remediation-proposals/${encodeURIComponent(proposal.id)}/${decision}`, {
-              method: 'POST',
-              body: JSON.stringify({actor: reviewer, comment: comment.value.trim()})
-            });
-            await loadDetail(selectedID);
-          } catch (error) {
-            status.textContent = error.message;
-            status.className = 'status-line error';
-            approve.disabled = false;
-            reject.disabled = false;
-          }
-        };
-        approve.addEventListener('click', () => decide('approve'));
-        reject.addEventListener('click', () => decide('reject'));
-        form.append(actor, comment, approve, reject, status);
-        card.append(form);
-      }
-      if (proposal.status === 'approved' && proposal.submission_status !== 'submitted' && proposal.submission_status !== 'submitting') {
-        const submit = text('button', proposal.submission_status === 'failed' ? 'Retry PR submission' : 'Submit GitHub PR');
-        submit.type = 'button';
-        const status = text('span', proposal.submission_error || '', proposal.submission_error ? 'status-line error' : 'status-line');
-        submit.addEventListener('click', async () => {
-          if (!window.confirm('Create a Git branch, commit, and pull request for this approved proposal? NERV will not merge it.')) return;
-          submit.disabled = true;
-          status.textContent = 'Submitting GitHub PR…';
-          status.className = 'status-line';
-          try {
-            await api(`/remediation-proposals/${encodeURIComponent(proposal.id)}/submit`, {method: 'POST'});
-            await loadDetail(selectedID);
-          } catch (error) {
-            status.textContent = error.message;
-            status.className = 'status-line error';
-            submit.disabled = false;
-          }
-        });
-        const controls = document.createElement('div');
-        controls.className = 'proposal-decision';
-        controls.append(submit, status);
-        card.append(controls);
-      }
-      if (proposal.pull_request_url) {
-        const link = document.createElement('a');
-        link.href = proposal.pull_request_url;
-        link.target = '_blank';
-        link.rel = 'noopener noreferrer';
-        link.textContent = `Open PR #${proposal.pull_request_number}`;
-        card.append(link);
-      }
-      remediation.append(card);
-    }
-    return remediation;
-  }
-
-  async function loadDetail(id) {
-    selectedID = id;
-    detail.replaceChildren(text('p', 'Loading investigation…', 'status-line'));
+  async function loadIncidentDetail(id) {
+    selectedIncidentID = id;
+    incidentDetail.replaceChildren(text('p', 'Loading investigation…', 'status-line'));
     try {
-      const [data, proposals] = await Promise.all([
-        api(`/investigations/${encodeURIComponent(id)}`),
-        api(`/investigations/${encodeURIComponent(id)}/remediation-proposals`)
-      ]);
-      data.remediation_proposals = proposals.items || [];
-      renderDetail(data);
-      for (const button of list.querySelectorAll('.incident')) button.classList.toggle('active', button.dataset.incidentId === id);
+      const data = await api(`/investigations/${encodeURIComponent(id)}`);
+      renderIncidentDetail(data);
+      for (const button of incidentList.querySelectorAll('.incident')) button.classList.toggle('active', button.dataset.incidentId === id);
     } catch (error) {
-      detail.replaceChildren(text('p', error.message, 'error'));
+      incidentDetail.replaceChildren(text('p', error.message, 'error'));
     }
   }
 
-  $('#auth-form').addEventListener('submit', (event) => {
+  async function loadRemediationQueue() {
+    if (!token()) return;
+    const status = $('#remediation-list-status');
+    status.textContent = 'Loading proposals…';
+    status.className = 'status-line';
+    remediationList.replaceChildren();
+    const filter = $('#remediation-status').value;
+    const query = filter ? `?status=${encodeURIComponent(filter)}` : '';
+    try {
+      const data = await api(`/remediation-proposals${query}`);
+      const items = data.items || [];
+      if (!items.length) remediationList.append(text('p', 'No remediation proposals match this view.', 'status-line'));
+      for (const proposal of items) remediationList.append(remediationButton(proposal));
+      status.textContent = `${items.length} proposal${items.length === 1 ? '' : 's'} loaded`;
+      const selected = items.find((item) => item.id === selectedProposalID) || items[0];
+      if (selected) renderRemediationDetail(selected);
+    } catch (error) {
+      status.textContent = error.message;
+      status.className = 'status-line error';
+    }
+  }
+
+  function remediationButton(proposal) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.dataset.proposalId = proposal.id;
+    button.className = `incident${proposal.id === selectedProposalID ? ' active' : ''}`;
+    const top = document.createElement('div');
+    top.className = 'incident-top';
+    top.append(badge(proposal.status, proposal.status !== 'approved'), badge(proposal.submission_status || 'not_submitted', proposal.submission_status === 'failed'));
+    button.append(top, text('strong', proposal.summary));
+    button.append(text('div', `${proposal.target_resource?.kind || 'Workload'} ${proposal.target_resource?.namespace || ''}/${proposal.target_resource?.name || ''} · ${proposal.expected_state?.replicas ?? '?'} → ${proposal.desired_change?.replicas ?? '?'}`, 'meta'));
+    button.addEventListener('click', () => renderRemediationDetail(proposal));
+    return button;
+  }
+
+  function renderRemediationDetail(proposal) {
+    selectedProposalID = proposal.id;
+    remediationDetail.replaceChildren();
+    for (const button of remediationList.querySelectorAll('.incident')) button.classList.toggle('active', button.dataset.proposalId === proposal.id);
+
+    const heading = document.createElement('div');
+    heading.className = 'section-heading';
+    const title = document.createElement('div');
+    title.append(text('p', 'GitOps remediation', 'eyebrow'), text('h2', proposal.summary));
+    heading.append(title, badge(proposal.status, proposal.status !== 'approved'));
+    remediationDetail.append(heading);
+
+    const resource = proposal.target_resource || {};
+    const grid = document.createElement('div');
+    grid.className = 'decision-grid';
+    grid.append(
+      fact('Repository', proposal.target_repository),
+      fact('Path', proposal.target_path),
+      fact('Resource', [resource.api_version, resource.kind, resource.namespace, resource.name].filter(Boolean).join(' / ')),
+      fact('Replica change', `${proposal.expected_state?.replicas ?? '?'} → ${proposal.desired_change?.replicas ?? '?'}`),
+      fact('Risk', `${proposal.risk_level}: ${proposal.risk_detail}`),
+      fact('Expires', formatTime(proposal.expires_at)),
+      fact('Reviewer', proposal.decision_actor || 'Pending'),
+      fact('PR submission', proposal.submission_status || 'not_submitted')
+    );
+    remediationDetail.append(grid, fact('Rationale', proposal.rationale));
+
+    const evidence = section('Evidence snapshots');
+    const evidenceList = document.createElement('div');
+    evidenceList.className = 'evidence';
+    for (const item of proposal.evidence || []) {
+      const node = document.createElement('div');
+      node.className = 'evidence-item';
+      node.append(text('strong', `Evidence ${item.incident_evidence_ordinal}: ${item.source}`), text('p', item.summary));
+      evidenceList.append(node);
+    }
+    evidence.append(evidenceList);
+    remediationDetail.append(evidence);
+
+    const diff = section(`Rendered diff (${proposal.render_format})`);
+    diff.append(text('pre', proposal.rendered_diff, 'diff'));
+    remediationDetail.append(diff);
+
+    if (proposal.status === 'pending' && new Date(proposal.expires_at).valueOf() > Date.now()) remediationDetail.append(decisionControls(proposal));
+    if (proposal.status === 'approved' && proposal.submission_status !== 'submitted' && proposal.submission_status !== 'submitting') remediationDetail.append(submissionControls(proposal));
+    if (proposal.submission_error) remediationDetail.append(text('p', proposal.submission_error, 'error'));
+    if (proposal.pull_request_url) {
+      const link = document.createElement('a');
+      link.className = 'pr-link';
+      link.href = proposal.pull_request_url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = `Open GitHub PR #${proposal.pull_request_number}`;
+      remediationDetail.append(link);
+    }
+  }
+
+  function decisionControls(proposal) {
+    const form = document.createElement('form');
+    form.className = 'proposal-decision';
+    const actor = document.createElement('input');
+    actor.required = true;
+    actor.maxLength = 200;
+    actor.placeholder = 'Reviewer name';
+    actor.setAttribute('aria-label', 'Reviewer name');
+    const comment = document.createElement('textarea');
+    comment.maxLength = 2000;
+    comment.rows = 2;
+    comment.placeholder = 'Decision comment';
+    comment.setAttribute('aria-label', 'Decision comment');
+    const approve = text('button', 'Approve');
+    approve.type = 'button';
+    const reject = text('button', 'Reject', 'secondary');
+    reject.type = 'button';
+    const status = text('span', '', 'status-line');
+    const decide = async (decision) => {
+      const reviewer = actor.value.trim();
+      if (!reviewer) { status.textContent = 'Reviewer name is required.'; status.className = 'status-line error'; return; }
+      if (decision === 'approve' && !window.confirm('Approve this remediation proposal? Approval alone does not create a repository change.')) return;
+      approve.disabled = true;
+      reject.disabled = true;
+      status.textContent = `${decision === 'approve' ? 'Approving' : 'Rejecting'}…`;
+      try {
+        await api(`/remediation-proposals/${encodeURIComponent(proposal.id)}/${decision}`, {method: 'POST', body: JSON.stringify({actor: reviewer, comment: comment.value.trim()})});
+        await loadRemediationQueue();
+      } catch (error) {
+        status.textContent = error.message;
+        status.className = 'status-line error';
+        approve.disabled = false;
+        reject.disabled = false;
+      }
+    };
+    approve.addEventListener('click', () => decide('approve'));
+    reject.addEventListener('click', () => decide('reject'));
+    form.append(actor, comment, approve, reject, status);
+    return form;
+  }
+
+  function submissionControls(proposal) {
+    const controls = document.createElement('div');
+    controls.className = 'proposal-decision';
+    const submit = text('button', proposal.submission_status === 'failed' ? 'Retry PR submission' : 'Submit GitHub PR');
+    submit.type = 'button';
+    const status = text('span', '', 'status-line');
+    submit.addEventListener('click', async () => {
+      if (!window.confirm('Create a Git branch, commit, and pull request? NERV will not merge it.')) return;
+      submit.disabled = true;
+      status.textContent = 'Submitting GitHub PR…';
+      try {
+        await api(`/remediation-proposals/${encodeURIComponent(proposal.id)}/submit`, {method: 'POST'});
+        await loadRemediationQueue();
+      } catch (error) {
+        status.textContent = error.message;
+        status.className = 'status-line error';
+        submit.disabled = false;
+      }
+    });
+    controls.append(submit, status);
+    return controls;
+  }
+
+  $('#auth-form').addEventListener('submit', async (event) => {
     event.preventDefault();
-    const value = tokenInput.value.trim();
-    if (value) saveToken(value);
-    else clearToken();
-    tokenInput.value = '';
-    setConnection();
-    offset = 0;
-    loadIncidents();
+    const value = $('#token').value.trim();
+    const status = $('#auth-status');
+    if (!value) return;
+    saveToken(value);
+    status.textContent = 'Validating…';
+    status.className = 'status-line';
+    try {
+      await api('/auth/check');
+      $('#token').value = '';
+      status.textContent = '';
+      setAuthenticated(true);
+      activateTab(['ask', 'incidents', 'remediation'].includes(location.hash.slice(1)) ? location.hash.slice(1) : 'ask');
+    } catch (error) {
+      lockOperator();
+      status.textContent = error.message;
+      status.className = 'status-line error';
+    }
   });
 
-  $('#forget-token').addEventListener('click', () => {
-    clearToken();
-    tokenInput.value = '';
-    setConnection();
-    list.replaceChildren();
-    detail.replaceChildren(text('p', 'Bearer token removed from this browser session.', 'status-line'));
-  });
+  $('#forget-token').addEventListener('click', lockOperator);
 
   $('#ask-form').addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -417,10 +459,10 @@
     try {
       const finding = await api('/ask', {method: 'POST', body: JSON.stringify(body)});
       status.textContent = `Completed: ${finding.id}`;
-      selectedID = finding.id;
+      selectedIncidentID = finding.id;
       offset = 0;
-      await loadIncidents();
-      await loadDetail(finding.id);
+      activateTab('incidents');
+      await loadIncidentDetail(finding.id);
     } catch (error) {
       status.textContent = error.message;
       status.className = 'error';
@@ -429,11 +471,26 @@
     }
   });
 
+  for (const button of document.querySelectorAll('.tab')) button.addEventListener('click', () => activateTab(button.dataset.tab));
   $('#filters').addEventListener('submit', (event) => { event.preventDefault(); offset = 0; loadIncidents(); });
   $('#refresh').addEventListener('click', loadIncidents);
   $('#previous').addEventListener('click', () => { offset = Math.max(0, offset - pageSize); loadIncidents(); });
   $('#next').addEventListener('click', () => { if (hasMore) { offset += pageSize; loadIncidents(); } });
+  $('#refresh-remediation').addEventListener('click', loadRemediationQueue);
+  $('#remediation-status').addEventListener('change', () => { selectedProposalID = ''; loadRemediationQueue(); });
 
-  setConnection();
-  if (token()) loadIncidents();
+  async function initialize() {
+    setAuthenticated(false);
+    if (!token()) return;
+    try {
+      await api('/auth/check');
+      setAuthenticated(true);
+      const requested = location.hash.slice(1);
+      activateTab(['ask', 'incidents', 'remediation'].includes(requested) ? requested : activeTab);
+    } catch (_) {
+      lockOperator();
+    }
+  }
+
+  initialize();
 })();

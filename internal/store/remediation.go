@@ -136,6 +136,45 @@ WHERE incident_id = $1 AND status = 'pending' AND expires_at <= now()`, incident
 	return proposals, nil
 }
 
+func (p *Postgres) ListAllProposals(ctx context.Context, status string, limit int) ([]remediation.Proposal, error) {
+	if _, err := p.pool.Exec(ctx, `
+UPDATE nerv.remediation_proposals
+SET status = 'expired', updated_at = now()
+WHERE status = 'pending' AND expires_at <= now()`); err != nil {
+		return nil, fmt.Errorf("expire remediation proposals: %w", err)
+	}
+	rows, err := p.pool.Query(ctx, `
+SELECT `+proposalColumns+`
+FROM nerv.remediation_proposals
+WHERE $1 = '' OR status = $1
+ORDER BY
+    CASE status WHEN 'pending' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END,
+    created_at DESC, id DESC
+LIMIT $2`, status, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query remediation proposal queue: %w", err)
+	}
+	defer rows.Close()
+	proposals := make([]remediation.Proposal, 0)
+	for rows.Next() {
+		proposal, scanErr := scanProposal(rows)
+		if scanErr != nil {
+			return nil, fmt.Errorf("scan remediation proposal queue: %w", scanErr)
+		}
+		proposals = append(proposals, proposal)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read remediation proposal queue: %w", err)
+	}
+	for i := range proposals {
+		proposals[i].Evidence, err = queryProposalEvidence(ctx, p.pool, proposals[i].ID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return proposals, nil
+}
+
 func (p *Postgres) GetProposal(ctx context.Context, proposalID string) (remediation.Proposal, error) {
 	if _, err := p.pool.Exec(ctx, `
 UPDATE nerv.remediation_proposals

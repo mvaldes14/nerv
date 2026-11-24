@@ -56,6 +56,9 @@ func (f *fakeRemediationService) Create(_ context.Context, _ string, req remedia
 func (f *fakeRemediationService) List(context.Context, string) ([]remediation.Proposal, error) {
 	return []remediation.Proposal{f.proposal}, f.err
 }
+func (f *fakeRemediationService) ListAll(context.Context, string) ([]remediation.Proposal, error) {
+	return []remediation.Proposal{f.proposal}, f.err
+}
 func (f *fakeRemediationService) Get(context.Context, string) (remediation.Proposal, error) {
 	return f.proposal, f.err
 }
@@ -224,12 +227,41 @@ func TestOperatorUIAndAssetsLoadWithoutAuthentication(t *testing.T) {
 	}
 }
 
+func TestOperatorUIStartsBehindAuthenticationGate(t *testing.T) {
+	handler := NewHandler(Dependencies{Service: &fakeInvestigationService{}, AuthToken: "secret"})
+	req := httptest.NewRequest(http.MethodGet, "/ui/", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	body := response.Body.String()
+	for _, required := range []string{"auth-gate", "operator-shell", "Ask", "Incidents", "Remediation"} {
+		if !strings.Contains(body, required) {
+			t.Errorf("index does not contain %q", required)
+		}
+	}
+	if !strings.Contains(body, `id="operator-shell" hidden`) {
+		t.Fatal("operator shell must start hidden")
+	}
+}
+
+func TestAuthCheckAcceptsValidBearerToken(t *testing.T) {
+	handler := NewHandler(Dependencies{Service: &fakeInvestigationService{}, AuthToken: "secret"})
+	req := httptest.NewRequest(http.MethodGet, "/auth/check", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"authenticated":true`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestRemediationRoutesRequireBearerAuthentication(t *testing.T) {
 	handler := NewHandler(Dependencies{Service: &fakeInvestigationService{}, Remediation: &fakeRemediationService{}, AuthToken: "secret"})
 	for _, test := range []struct {
 		method string
 		path   string
 	}{
+		{method: http.MethodGet, path: "/auth/check"},
+		{method: http.MethodGet, path: "/remediation-proposals"},
 		{method: http.MethodPost, path: "/investigations/inc-1/remediation-proposals"},
 		{method: http.MethodGet, path: "/investigations/inc-1/remediation-proposals"},
 		{method: http.MethodGet, path: "/remediation-proposals/proposal-1"},
@@ -261,6 +293,7 @@ func TestRemediationEndpointsReturnProposalData(t *testing.T) {
 	}{
 		{name: "create", method: http.MethodPost, path: "/investigations/inc-1/remediation-proposals", body: createBody, want: http.StatusCreated},
 		{name: "list", method: http.MethodGet, path: "/investigations/inc-1/remediation-proposals", want: http.StatusOK},
+		{name: "queue", method: http.MethodGet, path: "/remediation-proposals", want: http.StatusOK},
 		{name: "get", method: http.MethodGet, path: "/remediation-proposals/proposal-1", want: http.StatusOK},
 		{name: "reject", method: http.MethodPost, path: "/remediation-proposals/proposal-1/reject", body: `{"actor":"alice","comment":"not now"}`, want: http.StatusOK},
 		{name: "submit", method: http.MethodPost, path: "/remediation-proposals/proposal-1/submit", want: http.StatusOK},
@@ -365,7 +398,7 @@ func TestOperatorUIRendersSuppressionAsPolicyOutcome(t *testing.T) {
 			t.Fatalf("app.js must not contain %q", forbidden)
 		}
 	}
-	for _, required := range []string{"GitOps remediation proposals", "rendered_diff", "window.confirm", "Approve", "Reject", "Submit GitHub PR"} {
+	for _, required := range []string{"loadRemediationQueue", "rendered_diff", "window.confirm", "Approve", "Reject", "Submit GitHub PR", "/auth/check"} {
 		if !strings.Contains(script, required) {
 			t.Errorf("app.js does not contain %q", required)
 		}

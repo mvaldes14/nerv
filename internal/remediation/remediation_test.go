@@ -26,7 +26,10 @@ func (f *fakeStore) CreateProposal(_ context.Context, proposal Proposal, ordinal
 	return proposal, nil
 }
 func (f *fakeStore) ListProposals(context.Context, string, int) ([]Proposal, error) { return nil, nil }
-func (f *fakeStore) GetProposal(context.Context, string) (Proposal, error)          { return f.proposal, nil }
+func (f *fakeStore) ListAllProposals(context.Context, string, int) ([]Proposal, error) {
+	return nil, nil
+}
+func (f *fakeStore) GetProposal(context.Context, string) (Proposal, error) { return f.proposal, nil }
 func (f *fakeStore) DecideProposal(_ context.Context, _ string, status, actor, subject, comment string) (Proposal, error) {
 	f.status = status
 	f.subject = subject
@@ -193,6 +196,16 @@ func TestParseConfigRejectsUntrustedTargets(t *testing.T) {
 				t.Fatal("unsafe config accepted")
 			}
 		})
+	}
+}
+
+func TestListAllRejectsUnknownStatus(t *testing.T) {
+	service, err := NewService(testConfig(), &fakeStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ListAll(context.Background(), "submitted"); err == nil {
+		t.Fatal("expected status validation error")
 	}
 }
 

@@ -31,6 +31,7 @@ type investigationService interface {
 type remediationService interface {
 	Create(context.Context, string, remediation.CreateRequest) (remediation.Proposal, error)
 	List(context.Context, string) ([]remediation.Proposal, error)
+	ListAll(context.Context, string) ([]remediation.Proposal, error)
 	Get(context.Context, string) (remediation.Proposal, error)
 	Approve(context.Context, string, remediation.DecisionRequest, string) (remediation.Proposal, error)
 	Reject(context.Context, string, remediation.DecisionRequest, string) (remediation.Proposal, error)
@@ -73,6 +74,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) { h.mux.Serv
 func (h *Handler) routes() {
 	h.mux.HandleFunc("GET /healthz", h.health)
 	h.mux.HandleFunc("GET /readyz", h.ready)
+	h.mux.Handle("GET /auth/check", h.requireAuth(http.HandlerFunc(h.authCheck)))
 	h.mux.HandleFunc("GET /ui", h.redirectUI)
 	h.mux.Handle("GET /ui/", h.uiHandler())
 	h.mux.Handle("POST /ask", h.requireAuth(http.HandlerFunc(h.ask)))
@@ -81,10 +83,15 @@ func (h *Handler) routes() {
 	h.mux.Handle("GET /investigations/{id}", h.requireAuth(http.HandlerFunc(h.getInvestigation)))
 	h.mux.Handle("POST /investigations/{id}/remediation-proposals", h.requireAuth(http.HandlerFunc(h.createRemediationProposal)))
 	h.mux.Handle("GET /investigations/{id}/remediation-proposals", h.requireAuth(http.HandlerFunc(h.listRemediationProposals)))
+	h.mux.Handle("GET /remediation-proposals", h.requireAuth(http.HandlerFunc(h.listAllRemediationProposals)))
 	h.mux.Handle("GET /remediation-proposals/{id}", h.requireAuth(http.HandlerFunc(h.getRemediationProposal)))
 	h.mux.Handle("POST /remediation-proposals/{id}/approve", h.requireAuth(http.HandlerFunc(h.approveRemediationProposal)))
 	h.mux.Handle("POST /remediation-proposals/{id}/reject", h.requireAuth(http.HandlerFunc(h.rejectRemediationProposal)))
 	h.mux.Handle("POST /remediation-proposals/{id}/submit", h.requireAuth(http.HandlerFunc(h.submitRemediationProposal)))
+}
+
+func (h *Handler) authCheck(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true})
 }
 
 func (h *Handler) health(w http.ResponseWriter, _ *http.Request) {
@@ -231,6 +238,19 @@ func (h *Handler) listRemediationProposals(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	proposals, err := h.remediation.List(r.Context(), r.PathValue("id"))
+	if err != nil {
+		h.writeRemediationError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": proposals})
+}
+
+func (h *Handler) listAllRemediationProposals(w http.ResponseWriter, r *http.Request) {
+	if h.remediation == nil {
+		writeError(w, http.StatusServiceUnavailable, "remediation service unavailable")
+		return
+	}
+	proposals, err := h.remediation.ListAll(r.Context(), r.URL.Query().Get("status"))
 	if err != nil {
 		h.writeRemediationError(w, err)
 		return

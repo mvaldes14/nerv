@@ -123,6 +123,13 @@ func TestRemediationProposalPersistenceQueryAndStateTransitions(t *testing.T) {
 	if len(listed) != 1 || listed[0].ID != created.ID {
 		t.Fatalf("listed proposals = %+v", listed)
 	}
+	queued, err := service.ListAll(context.Background(), remediation.StatusPending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queued) != 1 || queued[0].ID != created.ID {
+		t.Fatalf("queued proposals = %+v", queued)
+	}
 	approved, err := service.Approve(context.Background(), created.ID, remediation.DecisionRequest{Actor: "alice", Comment: "reviewed"}, "shared-bearer")
 	if err != nil {
 		t.Fatal(err)
