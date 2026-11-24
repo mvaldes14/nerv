@@ -247,7 +247,13 @@ Returns one proposal. Reads lazily persist `expired` when database time reaches 
 {"actor":"alice","comment":"Reviewed evidence and target."}
 ```
 
-One atomic transition from `pending` wins. Terminal or expired proposals return `409`; missing proposals return `404`. `decision_auth_subject` is persisted as `shared-bearer`. Approval and rejection only update PostgreSQL state. This increment has no Git/GitHub client, repository write, Flux operation, Kubernetes mutation, or unattended executor. GitHub App PR creation is deferred.
+One atomic transition from `pending` wins. Terminal or expired proposals return `409`; missing proposals return `404`. `decision_auth_subject` is persisted as `shared-bearer`. Approval and rejection only update PostgreSQL state.
+
+### `POST /remediation-proposals/{id}/submit`
+
+Requires an approved proposal and configured GitHub App. Submission atomically claims the proposal, reads the allowlisted file from the configured base branch, verifies the exact resource identity and expected replica count, creates a deterministic `nerv/remediation-*` branch, changes only `spec.replicas`, commits, and opens a pull request. The response persists `submission_status`, branch, commit SHA, PR number, and PR URL. Failed submissions persist a bounded error and may be retried. Already-submitted proposals return their existing PR data.
+
+NERV never merges the pull request, pushes to the base branch, calls Flux mutation APIs, or writes Kubernetes resources. Repository drift returns `409` rather than overwriting unexpected state.
 
 ## Operator UI
 
@@ -255,7 +261,7 @@ One atomic transition from `pending` wins. Terminal or expired proposals return 
 
 Serves the embedded server-rendered shell, CSS, and minimal vanilla JavaScript from the same Go binary. Enter the bearer token in the UI; it is stored only in browser `sessionStorage` with a 30-minute expiry and sent in the `Authorization` header for `/ask` and investigation API requests. It is never inserted into HTML, JavaScript, URLs, or server logs.
 
-The UI talks only to NERV HTTP endpoints. It has no direct PostgreSQL, Kubernetes, SigNoz, or ClickHouse access. Incident detail displays remediation target, risk, evidence snapshots, expiry/reviewer metadata, deterministic diff, and approval controls. Approval requires explicit browser confirmation and still records state only.
+The UI talks only to NERV HTTP endpoints. It has no direct PostgreSQL, Kubernetes, SigNoz, or ClickHouse access. Incident detail displays remediation target, risk, evidence snapshots, expiry/reviewer metadata, deterministic diff, submission status, and PR URL. Approval and PR submission require separate explicit browser confirmations.
 
 ## Errors
 
@@ -272,7 +278,7 @@ Common status codes:
 | `400` | Invalid JSON, validation failure, missing question, or empty alert list |
 | `401` | Missing or invalid bearer token |
 | `404` | Investigation or remediation proposal ID not found |
-| `409` | Incident not completed with finding, or remediation proposal expired/terminal |
+| `409` | Incident not completed with finding, proposal state conflict, concurrent submission, or repository drift |
 | `429` | Durable rate, concurrency, daily token, or daily spend limit rejected new work; response includes `Retry-After` |
 | `500` | Investigation failed while `/ask` was waiting |
 | `503` | Alert could not be durably accepted, or readiness failed |

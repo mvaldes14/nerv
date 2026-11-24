@@ -15,7 +15,9 @@ const proposalColumns = `
 id, incident_id, action_kind, target_id, target_repository, target_path, target_resource,
 expected_state, desired_change, summary, rationale, risk_level, risk_detail, rendered_before,
 rendered_after, rendered_diff, render_format, status, created_at, updated_at, expires_at,
-COALESCE(decision_actor, ''), COALESCE(decision_auth_subject, ''), COALESCE(decision_comment, ''), decision_at`
+COALESCE(decision_actor, ''), COALESCE(decision_auth_subject, ''), COALESCE(decision_comment, ''), decision_at,
+submission_status, COALESCE(submission_branch, ''), COALESCE(submission_commit_sha, ''),
+COALESCE(pull_request_number, 0), COALESCE(pull_request_url, ''), COALESCE(submission_error, ''), submitted_at`
 
 func (p *Postgres) CreateProposal(ctx context.Context, proposal remediation.Proposal, evidenceOrdinals []int) (remediation.Proposal, error) {
 	tx, err := p.pool.Begin(ctx)
@@ -201,6 +203,71 @@ WHERE id = $1 AND status = 'pending' AND expires_at <= now()`, proposalID); err 
 	return remediation.Proposal{}, fmt.Errorf("%w: remediation proposal is %s", remediation.ErrConflict, currentStatus)
 }
 
+func (p *Postgres) BeginProposalSubmission(ctx context.Context, proposalID string) (remediation.Proposal, error) {
+	row := p.pool.QueryRow(ctx, `
+UPDATE nerv.remediation_proposals
+SET submission_status = 'submitting', submission_error = NULL, updated_at = now()
+WHERE id = $1 AND status = 'approved' AND (
+    submission_status IN ('not_submitted', 'failed')
+    OR (submission_status = 'submitting' AND updated_at < now() - interval '10 minutes')
+)
+RETURNING `+proposalColumns, proposalID)
+	proposal, err := scanProposal(row)
+	if err == nil {
+		proposal.Evidence, err = queryProposalEvidence(ctx, p.pool, proposal.ID)
+		return proposal, err
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return remediation.Proposal{}, fmt.Errorf("begin remediation submission: %w", err)
+	}
+	var status, submissionStatus string
+	var existing remediation.Proposal
+	existing, err = p.GetProposal(ctx, proposalID)
+	if err != nil {
+		return remediation.Proposal{}, err
+	}
+	status, submissionStatus = existing.Status, existing.SubmissionStatus
+	if status != remediation.StatusApproved {
+		return remediation.Proposal{}, fmt.Errorf("%w: remediation proposal is %s", remediation.ErrConflict, status)
+	}
+	if submissionStatus == remediation.SubmissionSubmitted {
+		return existing, nil
+	}
+	return remediation.Proposal{}, fmt.Errorf("%w: remediation proposal submission is %s", remediation.ErrConflict, submissionStatus)
+}
+
+func (p *Postgres) CompleteProposalSubmission(ctx context.Context, proposalID string, result remediation.SubmissionResult) (remediation.Proposal, error) {
+	proposal, err := scanProposal(p.pool.QueryRow(ctx, `
+UPDATE nerv.remediation_proposals
+SET submission_status = 'submitted', submission_branch = $2, submission_commit_sha = $3,
+    pull_request_number = $4, pull_request_url = $5, submission_error = NULL,
+    submitted_at = now(), updated_at = now()
+WHERE id = $1 AND status = 'approved' AND submission_status = 'submitting'
+RETURNING `+proposalColumns, proposalID, result.Branch, result.CommitSHA, result.PullRequestNumber, result.PullRequestURL))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return remediation.Proposal{}, fmt.Errorf("%w: remediation proposal submission cannot be completed", remediation.ErrConflict)
+	}
+	if err != nil {
+		return remediation.Proposal{}, fmt.Errorf("complete remediation submission: %w", err)
+	}
+	proposal.Evidence, err = queryProposalEvidence(ctx, p.pool, proposal.ID)
+	return proposal, err
+}
+
+func (p *Postgres) FailProposalSubmission(ctx context.Context, proposalID, message string) error {
+	command, err := p.pool.Exec(ctx, `
+UPDATE nerv.remediation_proposals
+SET submission_status = 'failed', submission_error = $2, updated_at = now()
+WHERE id = $1 AND status = 'approved' AND submission_status = 'submitting'`, proposalID, message)
+	if err != nil {
+		return fmt.Errorf("fail remediation submission: %w", err)
+	}
+	if command.RowsAffected() != 1 {
+		return fmt.Errorf("%w: remediation proposal submission cannot be failed", remediation.ErrConflict)
+	}
+	return nil
+}
+
 type proposalScanner interface {
 	Scan(dest ...any) error
 }
@@ -215,6 +282,8 @@ func scanProposal(row proposalScanner) (remediation.Proposal, error) {
 		&proposal.RenderedBefore, &proposal.RenderedAfter, &proposal.RenderedDiff, &proposal.RenderFormat,
 		&proposal.Status, &proposal.CreatedAt, &proposal.UpdatedAt, &proposal.ExpiresAt,
 		&proposal.DecisionActor, &proposal.DecisionAuthSubject, &proposal.DecisionComment, &proposal.DecisionAt,
+		&proposal.SubmissionStatus, &proposal.SubmissionBranch, &proposal.SubmissionCommitSHA,
+		&proposal.PullRequestNumber, &proposal.PullRequestURL, &proposal.SubmissionError, &proposal.SubmittedAt,
 	); err != nil {
 		return remediation.Proposal{}, err
 	}

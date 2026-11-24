@@ -71,7 +71,9 @@ Remediation lifecycle is isolated from DBOS investigation execution. PostgreSQL 
 
 Server generates deterministic `manifest_projection/v1` before/after documents and unified diff. It never parses executable intent from `Finding.recommended_action` and never accepts raw patches, repository/path/resource overrides, commands, shell, kubectl, URLs, file content, or caller-rendered diffs.
 
-State machine is `pending -> approved|rejected`; database-time expiry is persisted lazily as `expired`. Atomic conditional updates ensure one concurrent human decision wins. Approval records actor, shared bearer auth subject, comment, and timestamp only. GitHub App PR creation, Git credentials, repository writes, Flux operations, Kubernetes mutation, and unattended execution are deferred.
+Decision state machine is `pending -> approved|rejected`; database-time expiry is persisted lazily as `expired`. Atomic conditional updates ensure one concurrent human decision wins. Approval records actor, shared bearer auth subject, comment, and timestamp only.
+
+Approved proposals have a separate durable submission state: `not_submitted -> submitting -> submitted|failed`. Explicit submission authenticates as a least-privilege GitHub App installation, verifies base-branch state against the proposal, creates a deterministic branch, performs one allowlisted replica edit, commits, and opens a pull request. Failed submissions are retryable and repository drift fails closed. NERV cannot merge, push to the base branch, mutate Flux, or write Kubernetes resources.
 
 ## Kubernetes evidence
 
@@ -139,7 +141,7 @@ The Kubernetes ServiceAccount has `get`, `list`, and `watch` permissions only. T
 
 The base role is cluster-wide. A production overlay should replace it with namespace-scoped Roles when NERV only monitors an allowlist of namespaces.
 
-NERV does not expose a shell tool or a generic Kubernetes client to the model. Prompt instructions do not change RBAC permissions. Remediation approval adds no Kubernetes write permission and no Git/GitHub/HTTP repository client.
+NERV does not expose a shell tool or a generic Kubernetes client to the model. Prompt instructions do not change RBAC permissions. Remediation retains read-only Kubernetes RBAC. GitHub writes are isolated to an App installation scoped to selected repositories and are limited to remediation branches, commits, and pull requests; NERV has no merge operation.
 
 ## Failure behavior
 

@@ -67,6 +67,9 @@ func (f *fakeRemediationService) Reject(_ context.Context, _ string, req remedia
 	f.decision, f.authSubject = req, subject
 	return f.proposal, f.err
 }
+func (f *fakeRemediationService) Submit(context.Context, string) (remediation.Proposal, error) {
+	return f.proposal, f.err
+}
 
 func TestAlertRequestCorrelatesWithAutonomousFailure(t *testing.T) {
 	alert := alertmanagerAlert{
@@ -232,6 +235,7 @@ func TestRemediationRoutesRequireBearerAuthentication(t *testing.T) {
 		{method: http.MethodGet, path: "/remediation-proposals/proposal-1"},
 		{method: http.MethodPost, path: "/remediation-proposals/proposal-1/approve"},
 		{method: http.MethodPost, path: "/remediation-proposals/proposal-1/reject"},
+		{method: http.MethodPost, path: "/remediation-proposals/proposal-1/submit"},
 	} {
 		t.Run(test.method+" "+test.path, func(t *testing.T) {
 			req := httptest.NewRequest(test.method, test.path, strings.NewReader(`{}`))
@@ -259,6 +263,7 @@ func TestRemediationEndpointsReturnProposalData(t *testing.T) {
 		{name: "list", method: http.MethodGet, path: "/investigations/inc-1/remediation-proposals", want: http.StatusOK},
 		{name: "get", method: http.MethodGet, path: "/remediation-proposals/proposal-1", want: http.StatusOK},
 		{name: "reject", method: http.MethodPost, path: "/remediation-proposals/proposal-1/reject", body: `{"actor":"alice","comment":"not now"}`, want: http.StatusOK},
+		{name: "submit", method: http.MethodPost, path: "/remediation-proposals/proposal-1/submit", want: http.StatusOK},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -360,7 +365,7 @@ func TestOperatorUIRendersSuppressionAsPolicyOutcome(t *testing.T) {
 			t.Fatalf("app.js must not contain %q", forbidden)
 		}
 	}
-	for _, required := range []string{"GitOps remediation proposals", "rendered_diff", "window.confirm", "Approve", "Reject"} {
+	for _, required := range []string{"GitOps remediation proposals", "rendered_diff", "window.confirm", "Approve", "Reject", "Submit GitHub PR"} {
 		if !strings.Contains(script, required) {
 			t.Errorf("app.js does not contain %q", required)
 		}

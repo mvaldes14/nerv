@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mvaldes14/nerv/internal/githubapp"
 	"github.com/mvaldes14/nerv/internal/remediation"
 )
 
@@ -63,6 +64,7 @@ type Config struct {
 	OTLPEndpoint                   string
 	OTLPInsecure                   bool
 	Remediation                    remediation.Config
+	GitHubApp                      githubapp.Config
 }
 
 func Load() (Config, error) {
@@ -181,6 +183,14 @@ func Load() (Config, error) {
 	if cfg.Remediation, err = remediation.ParseConfig(os.Getenv("NERV_GITOPS_REPOSITORY"), os.Getenv("NERV_GITOPS_TARGETS_JSON")); err != nil {
 		return Config{}, err
 	}
+	cfg.GitHubApp = githubapp.Config{
+		AppID:          os.Getenv("NERV_GITHUB_APP_ID"),
+		InstallationID: os.Getenv("NERV_GITHUB_APP_INSTALLATION_ID"),
+		PrivateKey:     os.Getenv("NERV_GITHUB_APP_PRIVATE_KEY"),
+		BaseBranch:     envOr("NERV_GITHUB_BASE_BRANCH", "main"),
+		APIURL:         envOr("NERV_GITHUB_API_URL", "https://api.github.com"),
+		Timeout:        httpTimeout,
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -190,6 +200,18 @@ func Load() (Config, error) {
 func (c Config) Validate() error {
 	if err := c.Remediation.Validate(); err != nil {
 		return err
+	}
+	githubValues := 0
+	for _, value := range []string{c.GitHubApp.AppID, c.GitHubApp.InstallationID, c.GitHubApp.PrivateKey} {
+		if strings.TrimSpace(value) != "" {
+			githubValues++
+		}
+	}
+	if githubValues != 0 && githubValues != 3 {
+		return fmt.Errorf("NERV_GITHUB_APP_ID, NERV_GITHUB_APP_INSTALLATION_ID, and NERV_GITHUB_APP_PRIVATE_KEY must be configured together")
+	}
+	if githubValues == 3 && c.Remediation.Repository == "" {
+		return fmt.Errorf("GitHub App submission requires GitOps remediation targets")
 	}
 	if c.HTTPTimeout <= 0 || c.AgentTimeout <= 0 || c.AgentModelTimeout <= 0 || c.AgentToolTimeout <= 0 {
 		return fmt.Errorf("HTTP and agent timeouts must be positive")

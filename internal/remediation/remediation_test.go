@@ -9,11 +9,14 @@ import (
 )
 
 type fakeStore struct {
-	created  Proposal
-	ordinals []int
-	decided  Proposal
-	status   string
-	subject  string
+	created   Proposal
+	ordinals  []int
+	decided   Proposal
+	status    string
+	subject   string
+	proposal  Proposal
+	completed SubmissionResult
+	failed    string
 }
 
 func (f *fakeStore) CreateProposal(_ context.Context, proposal Proposal, ordinals []int) (Proposal, error) {
@@ -23,12 +26,37 @@ func (f *fakeStore) CreateProposal(_ context.Context, proposal Proposal, ordinal
 	return proposal, nil
 }
 func (f *fakeStore) ListProposals(context.Context, string, int) ([]Proposal, error) { return nil, nil }
-func (f *fakeStore) GetProposal(context.Context, string) (Proposal, error)          { return Proposal{}, nil }
+func (f *fakeStore) GetProposal(context.Context, string) (Proposal, error)          { return f.proposal, nil }
 func (f *fakeStore) DecideProposal(_ context.Context, _ string, status, actor, subject, comment string) (Proposal, error) {
 	f.status = status
 	f.subject = subject
 	f.decided = Proposal{Status: status, DecisionActor: actor, DecisionAuthSubject: subject, DecisionComment: comment}
 	return f.decided, nil
+}
+func (f *fakeStore) BeginProposalSubmission(context.Context, string) (Proposal, error) {
+	f.proposal.SubmissionStatus = SubmissionSubmitting
+	return f.proposal, nil
+}
+func (f *fakeStore) CompleteProposalSubmission(_ context.Context, _ string, result SubmissionResult) (Proposal, error) {
+	f.completed = result
+	f.proposal.SubmissionStatus = SubmissionSubmitted
+	f.proposal.PullRequestURL = result.PullRequestURL
+	return f.proposal, nil
+}
+func (f *fakeStore) FailProposalSubmission(_ context.Context, _ string, message string) error {
+	f.failed = message
+	return nil
+}
+
+type fakeSubmitter struct {
+	request SubmissionRequest
+	result  SubmissionResult
+	err     error
+}
+
+func (f *fakeSubmitter) Submit(_ context.Context, request SubmissionRequest) (SubmissionResult, error) {
+	f.request = request
+	return f.result, f.err
 }
 
 func testConfig() Config {
@@ -180,6 +208,46 @@ func TestDecisionPersistsSharedBearerSubject(t *testing.T) {
 	}
 	if store.status != StatusApproved || proposal.DecisionAuthSubject != "shared-bearer" {
 		t.Fatalf("decision = %+v", proposal)
+	}
+}
+
+func TestSubmitCreatesPullRequestForApprovedProposal(t *testing.T) {
+	store := &fakeStore{proposal: Proposal{
+		ID: "proposal-1", Status: StatusApproved, SubmissionStatus: SubmissionNotSubmitted,
+		TargetRepository: "mvaldes14/k8s-apps", TargetPath: "overlays/nerv/deployment.yaml",
+		TargetResource: Resource{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "nerv", Name: "nerv"},
+		ExpectedState:  ReplicaState{Replicas: 1}, DesiredChange: ReplicaState{Replicas: 2},
+		Summary: "scale nerv", Rationale: "validated",
+	}}
+	submitter := &fakeSubmitter{result: SubmissionResult{Branch: "nerv/remediation-proposal1", CommitSHA: "abc", PullRequestNumber: 108, PullRequestURL: "https://github.test/pr/108"}}
+	service, err := NewService(testConfig(), store, submitter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal, err := service.Submit(context.Background(), "proposal-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if submitter.request.ExpectedReplicas != 1 || submitter.request.DesiredReplicas != 2 {
+		t.Fatalf("request = %+v", submitter.request)
+	}
+	if proposal.SubmissionStatus != SubmissionSubmitted || proposal.PullRequestURL == "" {
+		t.Fatalf("proposal = %+v", proposal)
+	}
+}
+
+func TestSubmitRecordsFailure(t *testing.T) {
+	store := &fakeStore{proposal: Proposal{ID: "proposal-1", Status: StatusApproved, SubmissionStatus: SubmissionNotSubmitted}}
+	submitter := &fakeSubmitter{err: errors.New("github unavailable")}
+	service, err := NewService(testConfig(), store, submitter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Submit(context.Background(), "proposal-1"); err == nil {
+		t.Fatal("expected submission error")
+	}
+	if store.failed != "github unavailable" {
+		t.Fatalf("failure = %q", store.failed)
 	}
 }
 

@@ -38,6 +38,8 @@ data:
   # Empty pair disables GitOps proposal creation until an overlay supplies trusted targets.
   NERV_GITOPS_REPOSITORY: ""
   NERV_GITOPS_TARGETS_JSON: ""
+  NERV_GITHUB_BASE_BRANCH: "main"
+  NERV_GITHUB_API_URL: "https://api.github.com"
   NERV_DETECTION_ENABLED: "true"
   NERV_DETECTION_PERSISTENCE: "2m"
   NERV_DETECTION_COOLDOWN: "30m"
