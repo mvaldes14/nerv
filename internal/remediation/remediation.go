@@ -281,6 +281,7 @@ type Proposal struct {
 type Store interface {
 	CreateProposal(ctx context.Context, proposal Proposal, evidenceOrdinals []int) (Proposal, error)
 	ListProposals(ctx context.Context, incidentID string, limit int) ([]Proposal, error)
+	ListAllProposals(ctx context.Context, status string, limit int) ([]Proposal, error)
 	GetProposal(ctx context.Context, proposalID string) (Proposal, error)
 	DecideProposal(ctx context.Context, proposalID, status, actor, authSubject, comment string) (Proposal, error)
 	BeginProposalSubmission(ctx context.Context, proposalID string) (Proposal, error)
@@ -369,6 +370,22 @@ func (s *Service) List(ctx context.Context, incidentID string) ([]Proposal, erro
 		return nil, err
 	}
 	proposals, err := s.store.ListProposals(ctx, incidentID, MaxProposals)
+	if err != nil {
+		recordError(span, err)
+	}
+	return proposals, err
+}
+
+func (s *Service) ListAll(ctx context.Context, status string) ([]Proposal, error) {
+	ctx, span := tracer.Start(ctx, "remediation.list_all")
+	defer span.End()
+	status = strings.TrimSpace(status)
+	if status != "" && status != StatusPending && status != StatusApproved && status != StatusRejected && status != StatusExpired {
+		err := invalid("status must be pending, approved, rejected, or expired")
+		recordError(span, err)
+		return nil, err
+	}
+	proposals, err := s.store.ListAllProposals(ctx, status, MaxProposals)
 	if err != nil {
 		recordError(span, err)
 	}

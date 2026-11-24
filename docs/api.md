@@ -236,6 +236,10 @@ Returns up to 50 proposals newest first:
 {"items": []}
 ```
 
+### `GET /remediation-proposals`
+
+Returns the operator remediation queue across incidents, with pending proposals first. Optional `status=pending|approved|rejected|expired` filters the queue.
+
 ### `GET /remediation-proposals/{id}`
 
 Returns one proposal. Reads lazily persist `expired` when database time reaches `expires_at`.
@@ -259,9 +263,9 @@ NERV never merges the pull request, pushes to the base branch, calls Flux mutati
 
 ### `GET /ui/`
 
-Serves the embedded server-rendered shell, CSS, and minimal vanilla JavaScript from the same Go binary. Enter the bearer token in the UI; it is stored only in browser `sessionStorage` with a 30-minute expiry and sent in the `Authorization` header for `/ask` and investigation API requests. It is never inserted into HTML, JavaScript, URLs, or server logs.
+Serves embedded HTML, CSS, and vanilla JavaScript from the same Go binary. The initial screen is an authentication gate; operator panels remain hidden until `GET /auth/check` validates the bearer token. The token is stored only in browser `sessionStorage` with a 30-minute expiry and is never inserted into HTML, JavaScript, URLs, or server logs. Static UI assets are not a security boundary; every data and mutation API remains bearer-protected.
 
-The UI talks only to NERV HTTP endpoints. It has no direct PostgreSQL, Kubernetes, SigNoz, or ClickHouse access. Incident detail displays remediation target, risk, evidence snapshots, expiry/reviewer metadata, deterministic diff, submission status, and PR URL. Approval and PR submission require separate explicit browser confirmations.
+The authenticated console has separate Ask, Incidents, and Remediation tabs. The remediation queue exposes evidence, deterministic diff, approval/rejection controls, submission status, and PR URL without requiring operators to find the originating incident first. Approval and PR submission require separate explicit browser confirmations. The UI has no direct PostgreSQL, Kubernetes, SigNoz, ClickHouse, Git, or GitHub access.
 
 ## Errors
 
