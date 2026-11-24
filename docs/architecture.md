@@ -73,7 +73,9 @@ Server generates deterministic `manifest_projection/v1` before/after documents a
 
 Decision state machine is `pending -> approved|rejected`; database-time expiry is persisted lazily as `expired`. Atomic conditional updates ensure one concurrent human decision wins. Approval records actor, shared bearer auth subject, comment, and timestamp only.
 
-Approved proposals have a separate durable submission state: `not_submitted -> submitting -> submitted|failed`. Explicit submission authenticates as a least-privilege GitHub App installation, verifies base-branch state against the proposal, creates a deterministic branch, performs one allowlisted replica edit, commits, and opens a pull request. Failed submissions are retryable and repository drift fails closed. NERV cannot merge, push to the base branch, mutate Flux, or write Kubernetes resources.
+Approved proposals have a separate durable submission state: `not_submitted -> submitting -> submitted|failed`. Explicit submission authenticates as a least-privilege GitHub App installation, verifies base-branch state against the proposal, creates a deterministic branch, performs one allowlisted replica edit, commits, and opens a pull request. Failed submissions are retryable and repository drift fails closed.
+
+Submitted PRs are polled through GitHub REST and persist open/closed/merged state plus close/merge/check timestamps; no webhook is required. Closed-unmerged PRs remain visible as canceled outcomes. NERV cannot merge, push to the base branch, mutate Flux, or write Kubernetes resources. Remaining lifecycle work begins after merge: correlate the repository revision with Flux reconciliation, verify resulting Kubernetes state, and persist success or escalation.
 
 ## Kubernetes evidence
 
@@ -141,7 +143,7 @@ The Kubernetes ServiceAccount has `get`, `list`, and `watch` permissions only. T
 
 The base role is cluster-wide. A production overlay should replace it with namespace-scoped Roles when NERV only monitors an allowlist of namespaces.
 
-NERV does not expose a shell tool or a generic Kubernetes client to the model. Prompt instructions do not change RBAC permissions. Remediation retains read-only Kubernetes RBAC. GitHub writes are isolated to an App installation scoped to selected repositories and are limited to remediation branches, commits, and pull requests; NERV has no merge operation.
+NERV does not expose a shell tool or a generic Kubernetes client to the model. Prompt instructions do not change RBAC permissions. Remediation retains read-only Kubernetes RBAC. GitHub writes are isolated to an App installation scoped to selected repositories and are limited by application behavior to remediation branches, commits, and pull requests; NERV has no merge operation. Operator UI is a bearer-authenticated thin client with separate Ask, Incidents, and Remediation views.
 
 ## Failure behavior
 

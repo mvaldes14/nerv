@@ -8,7 +8,7 @@
 
 NERV runs inside a cluster, accepts questions and alerts, autonomously detects sustained Kubernetes failures, gathers evidence, and records each investigation in PostgreSQL. DBOS checkpoints the workflow so it can resume after a restart instead of repeating completed work.
 
-NERV is read-only. It can inspect workloads, notify an operator, and durably record human-approved GitOps remediation proposals, but it cannot change repositories or cluster resources.
+NERV keeps Kubernetes access read-only. It can investigate workloads, notify operators, record human-approved GitOps remediation proposals, and use a least-privilege GitHub App to create remediation branches, commits, and pull requests. It cannot merge PRs or mutate cluster resources directly.
 
 ## How it works
 
@@ -31,6 +31,7 @@ question or alert
        +----> Decision Gateway
        +----> Agentgateway
        +----> Gotify
+       +----> GitHub App (approved remediation PRs)
 ```
 
 See [docs/architecture.md](docs/architecture.md) for workflow and component details.
@@ -72,7 +73,7 @@ task db:up
 task run:serve
 ```
 
-Open `http://127.0.0.1:8080/ui/`, enter the `NERV_AUTH_TOKEN`, then browse incidents or submit a question. The UI keeps the token in browser `sessionStorage` for at most 30 minutes and calls NERV HTTP APIs; it never connects directly to PostgreSQL, Kubernetes, SigNoz, or ClickHouse.
+Open `http://127.0.0.1:8080/ui/` and enter `NERV_AUTH_TOKEN`. Operator panels remain hidden until token validation succeeds. Console separates freeform Ask, incident history, and remediation review into tabs. UI keeps token in browser `sessionStorage` for at most 30 minutes and calls only NERV HTTP APIs.
 
 Ask about a pod from the CLI:
 
@@ -94,12 +95,15 @@ The local environment uses the echo provider unless you configure cluster AI ser
 | `GET /readyz` | PostgreSQL readiness |
 | `POST /ask` | Run an investigation and return the finding |
 | `POST /alert` | Durably accept alerts and return workflow IDs |
+| `GET /investigations/filter-options` | Return source, status, namespace, and workload dropdown values |
 | `GET /investigations` | List incident history with bounded pagination and filters |
 | `GET /investigations/{id}` | Return incident metadata, status, finding, evidence, and notifications |
 | `POST/GET /investigations/{id}/remediation-proposals` | Create or list bounded GitOps remediation proposals |
 | `GET /remediation-proposals/{id}` | Return proposal, evidence snapshots, deterministic projection, and diff |
 | `POST /remediation-proposals/{id}/approve` | Record human approval only |
 | `POST /remediation-proposals/{id}/reject` | Record human rejection only |
+| `POST /remediation-proposals/{id}/submit` | Create allowlisted GitHub branch, commit, and PR |
+| `POST /remediation-proposals/{id}/refresh` | Poll and persist PR open/closed/merged state |
 | `GET /ui/` | Embedded operator UI shell (API calls still require bearer authentication) |
 
 Request examples and response fields: [docs/api.md](docs/api.md).
@@ -143,6 +147,8 @@ internal/kubernetes/  read-only Kubernetes tools
 internal/decision/    Decision Gateway client
 internal/llm/         Agentgateway and echo providers
 internal/notify/      Gotify client
+internal/remediation/ GitOps proposal and approval policy
+internal/githubapp/   GitHub App authentication and PR client
 internal/store/       PostgreSQL records and migrations
 deploy/base/          shared Kubernetes manifests
 deploy/local/         disposable local cluster overlay
@@ -160,8 +166,11 @@ docs/                 architecture, API, and testing notes
 - API routes require bearer authentication when `NERV_AUTH_TOKEN` is set. Configure it for every private or shared deployment.
 - Operator UI stores bearer token in per-tab `sessionStorage` with a 30-minute expiry; token is never embedded in served HTML or JavaScript.
 - NERV has no public ingress in the base manifests.
-- Remediation approval only changes PostgreSQL state. No Git/GitHub client, repository write, Flux action, Kubernetes mutation, shell, command, or write RBAC exists.
-- GitHub App PR creation is explicitly deferred to a later increment.
+- Approval changes PostgreSQL state only; explicit submission is a separate operator action.
+- GitHub App is scoped to selected repositories with `contents:write`, `pull_requests:write`, and `metadata:read`.
+- Submission verifies expected repository state, edits one allowlisted workload replica field, and opens a human-reviewed PR.
+- NERV has no merge operation, no direct Flux mutation, no Kubernetes write RBAC, and no shell or command executor.
+- Submitted PR state is polled and persisted without requiring a webhook. Post-merge Flux reconciliation and cluster-state verification remain the next remediation increment.
 
 Gotify, PostgreSQL, and NERV share the cluster failure domain. A total cluster outage needs an external monitor and an out-of-band notification path.
 
