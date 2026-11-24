@@ -99,6 +99,39 @@ func TestSubmitCreatesBranchCommitAndPullRequest(t *testing.T) {
 	}
 }
 
+func TestPullRequestStatusReturnsClosedUnmerged(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closedAt := "2026-11-24T14:59:14Z"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/app/installations/42/access_tokens":
+			w.WriteHeader(http.StatusCreated)
+			io.WriteString(w, `{"token":"installation-token","permissions":{"contents":"write","pull_requests":"write"}}`)
+		case "/repos/mvaldes14/k8s-apps/pulls/111":
+			io.WriteString(w, `{"state":"closed","merged":false,"closed_at":"`+closedAt+`","merged_at":null}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	privatePEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	client, err := New(Config{AppID: "5905005", InstallationID: "42", PrivateKey: string(privatePEM), APIURL: server.URL, Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := client.PullRequestStatus(context.Background(), "mvaldes14/k8s-apps", 111)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != "closed" || status.Merged || status.ClosedAt == nil {
+		t.Fatalf("status = %+v", status)
+	}
+}
+
 func TestUpdateReplicasAcceptsNamespaceInjectedByKustomize(t *testing.T) {
 	manifest := strings.Replace(testManifest, "  namespace: nerv\n", "", 1)
 	updated, current, err := updateReplicas([]byte(manifest), remediation.Resource{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "nerv", Name: "nerv"}, 1, 2)

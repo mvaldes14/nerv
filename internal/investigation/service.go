@@ -117,6 +117,13 @@ type IncidentPage struct {
 	HasMore bool              `json:"has_more"`
 }
 
+type IncidentFilterOptions struct {
+	Sources    []string `json:"sources"`
+	Statuses   []string `json:"statuses"`
+	Namespaces []string `json:"namespaces"`
+	Workloads  []string `json:"workloads"`
+}
+
 type NotificationAttempt struct {
 	Sink        string    `json:"sink"`
 	ExternalID  string    `json:"external_id,omitempty"`
@@ -213,6 +220,7 @@ type Store interface {
 	SetStatus(ctx context.Context, incidentID, status string) error
 	GetInvestigation(ctx context.Context, incidentID string) (Investigation, error)
 	ListIncidents(ctx context.Context, filter IncidentFilter) (IncidentPage, error)
+	ListIncidentFilterOptions(ctx context.Context) (IncidentFilterOptions, error)
 	ResolveIncident(ctx context.Context, correlationKey string, cooldown time.Duration) (string, error)
 	ReleaseIncident(ctx context.Context, correlationKey, incidentID string) error
 	AdmitInvestigation(ctx context.Context, workflowID, source string, policy AdmissionPolicy) (AdmissionSnapshot, error)
@@ -391,6 +399,35 @@ func (s *Service) List(ctx context.Context, filter IncidentFilter) (IncidentPage
 		filter.Offset = MaxIncidentOffset
 	}
 	return s.store.ListIncidents(ctx, filter)
+}
+
+func (s *Service) FilterOptions(ctx context.Context) (IncidentFilterOptions, error) {
+	options, err := s.store.ListIncidentFilterOptions(ctx)
+	if err != nil {
+		return IncidentFilterOptions{}, err
+	}
+	options.Sources = mergeOptions([]string{SourceHTTPAsk, SourceCLI, SourceHTTPAlert, SourceKubernetesDetector}, options.Sources)
+	options.Statuses = mergeOptions([]string{"running", "completed", "failed"}, options.Statuses)
+	return options, nil
+}
+
+func mergeOptions(preferred, discovered []string) []string {
+	seen := make(map[string]struct{}, len(preferred)+len(discovered))
+	merged := make([]string, 0, len(preferred)+len(discovered))
+	for _, values := range [][]string{preferred, discovered} {
+		for _, value := range values {
+			value = strings.TrimSpace(value)
+			if value == "" {
+				continue
+			}
+			if _, exists := seen[value]; exists {
+				continue
+			}
+			seen[value] = struct{}{}
+			merged = append(merged, value)
+		}
+	}
+	return merged
 }
 
 func (s *Service) Ready(ctx context.Context) error {

@@ -10,6 +10,8 @@
   let selectedIncidentID = '';
   let selectedProposalID = '';
   let activeTab = 'ask';
+  let filterOptionsLoaded = false;
+  let prRefreshFailures = 0;
 
   const $ = (selector) => document.querySelector(selector);
   const incidentList = $('#incident-list');
@@ -50,8 +52,13 @@
     hasMore = false;
     selectedIncidentID = '';
     selectedProposalID = '';
+    filterOptionsLoaded = false;
     incidentList.replaceChildren();
     remediationList.replaceChildren();
+    const greeting = document.createElement('div');
+    greeting.className = 'message assistant';
+    greeting.append(text('strong', 'NERV'), text('p', 'Ask a freeform question. Each question runs as a separate investigation; responses stay visible in this browser session and can be opened from Incidents.'));
+    $('#conversation').replaceChildren(greeting);
     incidentDetail.replaceChildren(text('p', 'Select an incident after reconnecting.', 'status-line'));
     remediationDetail.replaceChildren(text('p', 'Select a proposal after reconnecting.', 'status-line'));
   }
@@ -126,8 +133,41 @@
     }
     for (const panel of document.querySelectorAll('.tab-panel')) panel.hidden = panel.id !== `tab-${name}`;
     history.replaceState(null, '', `#${name}`);
-    if (name === 'incidents') loadIncidents();
+    if (name === 'incidents') loadFilterOptions().then(loadIncidents);
     if (name === 'remediation') loadRemediationQueue();
+  }
+
+  async function loadFilterOptions() {
+    if (!token() || filterOptionsLoaded) return;
+    try {
+      const options = await api('/investigations/filter-options');
+      populateSelect('#filters select[name="source"]', options.sources || [], 'All sources');
+      populateSelect('#filters select[name="status"]', options.statuses || [], 'All statuses');
+      populateSelect('#filters select[name="namespace"]', options.namespaces || [], 'All namespaces');
+      populateSelect('#filters select[name="workload"]', options.workloads || [], 'All workloads');
+      filterOptionsLoaded = true;
+    } catch (error) {
+      const status = $('#list-status');
+      status.textContent = error.message;
+      status.className = 'status-line error';
+    }
+  }
+
+  function populateSelect(selector, values, emptyLabel) {
+    const select = $(selector);
+    const current = select.value;
+    select.replaceChildren();
+    const empty = document.createElement('option');
+    empty.value = '';
+    empty.textContent = emptyLabel;
+    select.append(empty);
+    for (const value of values) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = value;
+      select.append(option);
+    }
+    if (values.includes(current)) select.value = current;
   }
 
   function currentFilters() {
@@ -270,16 +310,31 @@
     const query = filter ? `?status=${encodeURIComponent(filter)}` : '';
     try {
       const data = await api(`/remediation-proposals${query}`);
-      const items = data.items || [];
+      const items = await refreshOpenPullRequests(data.items || []);
       if (!items.length) remediationList.append(text('p', 'No remediation proposals match this view.', 'status-line'));
       for (const proposal of items) remediationList.append(remediationButton(proposal));
-      status.textContent = `${items.length} proposal${items.length === 1 ? '' : 's'} loaded`;
+      status.textContent = `${items.length} proposal${items.length === 1 ? '' : 's'} loaded${prRefreshFailures ? `; ${prRefreshFailures} PR status refresh failed` : ''}`;
+      status.className = prRefreshFailures ? 'status-line error' : 'status-line';
       const selected = items.find((item) => item.id === selectedProposalID) || items[0];
       if (selected) renderRemediationDetail(selected);
     } catch (error) {
       status.textContent = error.message;
       status.className = 'status-line error';
     }
+  }
+
+  async function refreshOpenPullRequests(items) {
+    prRefreshFailures = 0;
+    return Promise.all(items.map(async (proposal) => {
+      if (proposal.submission_status !== 'submitted' || !proposal.pull_request_number) return proposal;
+      if (proposal.pull_request_state && proposal.pull_request_state !== 'open') return proposal;
+      try {
+        return await api(`/remediation-proposals/${encodeURIComponent(proposal.id)}/refresh`, {method: 'POST'});
+      } catch (_) {
+        prRefreshFailures += 1;
+        return proposal;
+      }
+    }));
   }
 
   function remediationButton(proposal) {
@@ -290,6 +345,7 @@
     const top = document.createElement('div');
     top.className = 'incident-top';
     top.append(badge(proposal.status, proposal.status !== 'approved'), badge(proposal.submission_status || 'not_submitted', proposal.submission_status === 'failed'));
+    if (proposal.pull_request_state) top.append(badge(`PR ${proposal.pull_request_merged ? 'merged' : proposal.pull_request_state}`, proposal.pull_request_state === 'closed' && !proposal.pull_request_merged));
     button.append(top, text('strong', proposal.summary));
     button.append(text('div', `${proposal.target_resource?.kind || 'Workload'} ${proposal.target_resource?.namespace || ''}/${proposal.target_resource?.name || ''} · ${proposal.expected_state?.replicas ?? '?'} → ${proposal.desired_change?.replicas ?? '?'}`, 'meta'));
     button.addEventListener('click', () => renderRemediationDetail(proposal));
@@ -319,7 +375,9 @@
       fact('Risk', `${proposal.risk_level}: ${proposal.risk_detail}`),
       fact('Expires', formatTime(proposal.expires_at)),
       fact('Reviewer', proposal.decision_actor || 'Pending'),
-      fact('PR submission', proposal.submission_status || 'not_submitted')
+      fact('PR submission', proposal.submission_status || 'not_submitted'),
+      fact('Pull request state', proposal.pull_request_merged ? 'merged' : (proposal.pull_request_state || 'not checked')),
+      fact('PR last checked', formatTime(proposal.pull_request_checked_at))
     );
     remediationDetail.append(grid, fact('Rationale', proposal.rationale));
 
@@ -343,6 +401,20 @@
     if (proposal.status === 'approved' && proposal.submission_status !== 'submitted' && proposal.submission_status !== 'submitting') remediationDetail.append(submissionControls(proposal));
     if (proposal.submission_error) remediationDetail.append(text('p', proposal.submission_error, 'error'));
     if (proposal.pull_request_url) {
+      const refresh = text('button', 'Refresh PR status', 'secondary');
+      refresh.type = 'button';
+      refresh.addEventListener('click', async () => {
+        refresh.disabled = true;
+        try {
+          const updated = await api(`/remediation-proposals/${encodeURIComponent(proposal.id)}/refresh`, {method: 'POST'});
+          renderRemediationDetail(updated);
+          await loadRemediationQueue();
+        } catch (error) {
+          remediationDetail.append(text('p', error.message, 'error'));
+          refresh.disabled = false;
+        }
+      });
+      remediationDetail.append(refresh);
       const link = document.createElement('a');
       link.className = 'pr-link';
       link.href = proposal.pull_request_url;
@@ -440,32 +512,46 @@
 
   $('#forget-token').addEventListener('click', lockOperator);
 
+  function appendConversationMessage(role, content, incidentID = '') {
+    const message = document.createElement('div');
+    message.className = `message ${role}`;
+    message.append(text('strong', role === 'assistant' ? 'NERV' : 'You'), text('p', content));
+    if (incidentID) {
+      const open = text('button', 'Open investigation', 'secondary');
+      open.type = 'button';
+      open.addEventListener('click', async () => {
+        selectedIncidentID = incidentID;
+        activateTab('incidents');
+        await loadIncidentDetail(incidentID);
+      });
+      message.append(open);
+    }
+    $('#conversation').append(message);
+    message.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+  }
+
   $('#ask-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
     const data = new FormData(form);
     const status = $('#ask-status');
     const submit = form.querySelector('button[type="submit"]');
-    const target = {};
-    for (const name of ['namespace', 'kind', 'name', 'container']) {
-      const value = String(data.get(name) || '').trim();
-      if (value) target[name] = value;
-    }
     const body = {question: String(data.get('question') || '').trim()};
-    if (Object.keys(target).length) body.target = target;
+    appendConversationMessage('user', body.question);
     submit.disabled = true;
     status.textContent = 'Investigation running…';
     status.className = '';
     try {
       const finding = await api('/ask', {method: 'POST', body: JSON.stringify(body)});
       status.textContent = `Completed: ${finding.id}`;
+      appendConversationMessage('assistant', finding.answer || 'Investigation completed without a textual answer.', finding.id);
+      form.reset();
       selectedIncidentID = finding.id;
       offset = 0;
-      activateTab('incidents');
-      await loadIncidentDetail(finding.id);
     } catch (error) {
       status.textContent = error.message;
       status.className = 'error';
+      appendConversationMessage('assistant', `Request failed: ${error.message}`);
     } finally {
       submit.disabled = false;
     }
@@ -473,7 +559,16 @@
 
   for (const button of document.querySelectorAll('.tab')) button.addEventListener('click', () => activateTab(button.dataset.tab));
   $('#filters').addEventListener('submit', (event) => { event.preventDefault(); offset = 0; loadIncidents(); });
-  $('#refresh').addEventListener('click', loadIncidents);
+  $('#clear-filters').addEventListener('click', () => {
+    $('#filters').reset();
+    offset = 0;
+    loadIncidents();
+  });
+  $('#refresh').addEventListener('click', async () => {
+    filterOptionsLoaded = false;
+    await loadFilterOptions();
+    loadIncidents();
+  });
   $('#previous').addEventListener('click', () => { offset = Math.max(0, offset - pageSize); loadIncidents(); });
   $('#next').addEventListener('click', () => { if (hasMore) { offset += pageSize; loadIncidents(); } });
   $('#refresh-remediation').addEventListener('click', loadRemediationQueue);

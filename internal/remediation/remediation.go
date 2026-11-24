@@ -242,40 +242,56 @@ type Submitter interface {
 	Submit(context.Context, SubmissionRequest) (SubmissionResult, error)
 }
 
+type PullRequestStatus struct {
+	State    string
+	Merged   bool
+	ClosedAt *time.Time
+	MergedAt *time.Time
+}
+
+type SubmissionTracker interface {
+	PullRequestStatus(context.Context, string, int) (PullRequestStatus, error)
+}
+
 type Proposal struct {
-	ID                  string       `json:"id"`
-	IncidentID          string       `json:"incident_id"`
-	ActionKind          string       `json:"action_kind"`
-	TargetID            string       `json:"target_id"`
-	TargetRepository    string       `json:"target_repository"`
-	TargetPath          string       `json:"target_path"`
-	TargetResource      Resource     `json:"target_resource"`
-	ExpectedState       ReplicaState `json:"expected_state"`
-	DesiredChange       ReplicaState `json:"desired_change"`
-	Summary             string       `json:"summary"`
-	Rationale           string       `json:"rationale"`
-	RiskLevel           string       `json:"risk_level"`
-	RiskDetail          string       `json:"risk_detail"`
-	RenderedBefore      string       `json:"rendered_before"`
-	RenderedAfter       string       `json:"rendered_after"`
-	RenderedDiff        string       `json:"rendered_diff"`
-	RenderFormat        string       `json:"render_format"`
-	Status              string       `json:"status"`
-	CreatedAt           time.Time    `json:"created_at"`
-	UpdatedAt           time.Time    `json:"updated_at"`
-	ExpiresAt           time.Time    `json:"expires_at"`
-	DecisionActor       string       `json:"decision_actor,omitempty"`
-	DecisionAuthSubject string       `json:"decision_auth_subject,omitempty"`
-	DecisionComment     string       `json:"decision_comment,omitempty"`
-	DecisionAt          *time.Time   `json:"decision_at,omitempty"`
-	SubmissionStatus    string       `json:"submission_status"`
-	SubmissionBranch    string       `json:"submission_branch,omitempty"`
-	SubmissionCommitSHA string       `json:"submission_commit_sha,omitempty"`
-	PullRequestNumber   int          `json:"pull_request_number,omitempty"`
-	PullRequestURL      string       `json:"pull_request_url,omitempty"`
-	SubmissionError     string       `json:"submission_error,omitempty"`
-	SubmittedAt         *time.Time   `json:"submitted_at,omitempty"`
-	Evidence            []Evidence   `json:"evidence"`
+	ID                   string       `json:"id"`
+	IncidentID           string       `json:"incident_id"`
+	ActionKind           string       `json:"action_kind"`
+	TargetID             string       `json:"target_id"`
+	TargetRepository     string       `json:"target_repository"`
+	TargetPath           string       `json:"target_path"`
+	TargetResource       Resource     `json:"target_resource"`
+	ExpectedState        ReplicaState `json:"expected_state"`
+	DesiredChange        ReplicaState `json:"desired_change"`
+	Summary              string       `json:"summary"`
+	Rationale            string       `json:"rationale"`
+	RiskLevel            string       `json:"risk_level"`
+	RiskDetail           string       `json:"risk_detail"`
+	RenderedBefore       string       `json:"rendered_before"`
+	RenderedAfter        string       `json:"rendered_after"`
+	RenderedDiff         string       `json:"rendered_diff"`
+	RenderFormat         string       `json:"render_format"`
+	Status               string       `json:"status"`
+	CreatedAt            time.Time    `json:"created_at"`
+	UpdatedAt            time.Time    `json:"updated_at"`
+	ExpiresAt            time.Time    `json:"expires_at"`
+	DecisionActor        string       `json:"decision_actor,omitempty"`
+	DecisionAuthSubject  string       `json:"decision_auth_subject,omitempty"`
+	DecisionComment      string       `json:"decision_comment,omitempty"`
+	DecisionAt           *time.Time   `json:"decision_at,omitempty"`
+	SubmissionStatus     string       `json:"submission_status"`
+	SubmissionBranch     string       `json:"submission_branch,omitempty"`
+	SubmissionCommitSHA  string       `json:"submission_commit_sha,omitempty"`
+	PullRequestNumber    int          `json:"pull_request_number,omitempty"`
+	PullRequestURL       string       `json:"pull_request_url,omitempty"`
+	PullRequestState     string       `json:"pull_request_state,omitempty"`
+	PullRequestMerged    bool         `json:"pull_request_merged"`
+	PullRequestCheckedAt *time.Time   `json:"pull_request_checked_at,omitempty"`
+	PullRequestClosedAt  *time.Time   `json:"pull_request_closed_at,omitempty"`
+	PullRequestMergedAt  *time.Time   `json:"pull_request_merged_at,omitempty"`
+	SubmissionError      string       `json:"submission_error,omitempty"`
+	SubmittedAt          *time.Time   `json:"submitted_at,omitempty"`
+	Evidence             []Evidence   `json:"evidence"`
 }
 
 type Store interface {
@@ -287,6 +303,7 @@ type Store interface {
 	BeginProposalSubmission(ctx context.Context, proposalID string) (Proposal, error)
 	CompleteProposalSubmission(ctx context.Context, proposalID string, result SubmissionResult) (Proposal, error)
 	FailProposalSubmission(ctx context.Context, proposalID, message string) error
+	UpdateProposalPullRequestStatus(ctx context.Context, proposalID string, status PullRequestStatus) (Proposal, error)
 }
 
 type Service struct {
@@ -294,6 +311,7 @@ type Service struct {
 	targets   map[string]Target
 	store     Store
 	submitter Submitter
+	tracker   SubmissionTracker
 }
 
 func NewService(config Config, store Store, submitters ...Submitter) (*Service, error) {
@@ -308,10 +326,12 @@ func NewService(config Config, store Store, submitters ...Submitter) (*Service, 
 		targets[target.ID] = target
 	}
 	var submitter Submitter
+	var tracker SubmissionTracker
 	if len(submitters) > 0 {
 		submitter = submitters[0]
+		tracker, _ = submitter.(SubmissionTracker)
 	}
-	return &Service{config: config, targets: targets, store: store, submitter: submitter}, nil
+	return &Service{config: config, targets: targets, store: store, submitter: submitter, tracker: tracker}, nil
 }
 
 func (s *Service) Create(ctx context.Context, incidentID string, req CreateRequest) (Proposal, error) {
@@ -448,6 +468,36 @@ func (s *Service) Submit(ctx context.Context, proposalID string) (Proposal, erro
 		return Proposal{}, err
 	}
 	proposal, err = s.store.CompleteProposalSubmission(ctx, proposalID, result)
+	if err != nil {
+		recordError(span, err)
+	}
+	return proposal, err
+}
+
+func (s *Service) RefreshPullRequest(ctx context.Context, proposalID string) (Proposal, error) {
+	ctx, span := tracer.Start(ctx, "remediation.refresh_pull_request")
+	defer span.End()
+	proposal, err := s.store.GetProposal(ctx, proposalID)
+	if err != nil {
+		recordError(span, err)
+		return Proposal{}, err
+	}
+	if proposal.SubmissionStatus != SubmissionSubmitted || proposal.PullRequestNumber <= 0 {
+		err := fmt.Errorf("%w: remediation proposal has no submitted pull request", ErrConflict)
+		recordError(span, err)
+		return Proposal{}, err
+	}
+	if s.tracker == nil {
+		err := invalid("GitHub App status tracking is not configured")
+		recordError(span, err)
+		return Proposal{}, err
+	}
+	status, err := s.tracker.PullRequestStatus(ctx, proposal.TargetRepository, proposal.PullRequestNumber)
+	if err != nil {
+		recordError(span, err)
+		return Proposal{}, err
+	}
+	proposal, err = s.store.UpdateProposalPullRequestStatus(ctx, proposalID, status)
 	if err != nil {
 		recordError(span, err)
 	}

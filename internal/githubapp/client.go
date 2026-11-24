@@ -94,6 +94,31 @@ func New(config Config) (*Client, error) {
 	}, nil
 }
 
+func (c *Client) PullRequestStatus(ctx context.Context, repository string, number int) (remediation.PullRequestStatus, error) {
+	owner, name, ok := strings.Cut(repository, "/")
+	if !ok || owner == "" || name == "" || strings.Contains(name, "/") || number <= 0 {
+		return remediation.PullRequestStatus{}, errors.New("invalid GitHub pull request identity")
+	}
+	token, err := c.installationToken(ctx)
+	if err != nil {
+		return remediation.PullRequestStatus{}, err
+	}
+	var response struct {
+		State    string     `json:"state"`
+		Merged   bool       `json:"merged"`
+		ClosedAt *time.Time `json:"closed_at"`
+		MergedAt *time.Time `json:"merged_at"`
+	}
+	endpoint := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(name) + "/pulls/" + strconv.Itoa(number)
+	if err := c.request(ctx, http.MethodGet, endpoint, token, nil, &response); err != nil {
+		return remediation.PullRequestStatus{}, err
+	}
+	if response.State != "open" && response.State != "closed" {
+		return remediation.PullRequestStatus{}, fmt.Errorf("unexpected GitHub pull request state %q", response.State)
+	}
+	return remediation.PullRequestStatus{State: response.State, Merged: response.Merged, ClosedAt: response.ClosedAt, MergedAt: response.MergedAt}, nil
+}
+
 func (c *Client) Submit(ctx context.Context, req remediation.SubmissionRequest) (remediation.SubmissionResult, error) {
 	owner, repository, ok := strings.Cut(req.Repository, "/")
 	if !ok || owner == "" || repository == "" || strings.Contains(repository, "/") {
