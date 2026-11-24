@@ -346,7 +346,11 @@ func updateReplicas(content []byte, resource remediation.Resource, expected, des
 			continue
 		}
 		metadata := mapping(root, "metadata")
-		if metadata == nil || scalar(metadata, "name") != resource.Name || scalar(metadata, "namespace") != resource.Namespace {
+		if metadata == nil || scalar(metadata, "name") != resource.Name {
+			continue
+		}
+		namespace := scalar(metadata, "namespace")
+		if namespace != "" && namespace != resource.Namespace {
 			continue
 		}
 		spec := mapping(root, "spec")

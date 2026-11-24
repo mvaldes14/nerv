@@ -99,6 +99,25 @@ func TestSubmitCreatesBranchCommitAndPullRequest(t *testing.T) {
 	}
 }
 
+func TestUpdateReplicasAcceptsNamespaceInjectedByKustomize(t *testing.T) {
+	manifest := strings.Replace(testManifest, "  namespace: nerv\n", "", 1)
+	updated, current, err := updateReplicas([]byte(manifest), remediation.Resource{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "nerv", Name: "nerv"}, 1, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current != 1 || !strings.Contains(string(updated), "  replicas: 2 # retained") {
+		t.Fatalf("unexpected result current=%d:\n%s", current, updated)
+	}
+}
+
+func TestUpdateReplicasRejectsConflictingNamespace(t *testing.T) {
+	manifest := strings.Replace(testManifest, "namespace: nerv", "namespace: other", 1)
+	_, _, err := updateReplicas([]byte(manifest), remediation.Resource{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "nerv", Name: "nerv"}, 1, 2)
+	if err == nil {
+		t.Fatal("expected conflicting namespace rejection")
+	}
+}
+
 func TestUpdateReplicasRejectsStaleExpectedState(t *testing.T) {
 	updated, current, err := updateReplicas([]byte(testManifest), remediation.Resource{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "nerv", Name: "nerv"}, 3, 4)
 	if err != nil {
