@@ -158,6 +158,57 @@ func (p *Postgres) ReleaseInvestigation(ctx context.Context, workflowID string) 
 	return active, nil
 }
 
+type TerminalInvestigationReconciliation struct {
+	IncidentsFailed int64
+	LeasesReleased  int64
+}
+
+func (p *Postgres) ReconcileTerminalInvestigations(ctx context.Context) (TerminalInvestigationReconciliation, error) {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return TerminalInvestigationReconciliation{}, fmt.Errorf("begin terminal investigation reconciliation: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('nerv-investigation-admission'))`); err != nil {
+		return TerminalInvestigationReconciliation{}, fmt.Errorf("lock terminal investigation reconciliation: %w", err)
+	}
+	incidentResult, err := tx.Exec(ctx, `
+UPDATE nerv.incidents i
+SET status = 'failed', updated_at = now()
+FROM dbos.workflow_status w
+WHERE i.workflow_id = w.workflow_uuid
+  AND i.status = 'running'
+  AND w.status IN ('ERROR', 'CANCELLED', 'MAX_RECOVERY_ATTEMPTS_EXCEEDED')`)
+	if err != nil {
+		return TerminalInvestigationReconciliation{}, fmt.Errorf("reconcile terminal incident status: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+UPDATE nerv.incident_correlations c
+SET active = false, cooldown_until = NULL, updated_at = now()
+FROM nerv.incidents i
+JOIN dbos.workflow_status w ON w.workflow_uuid = i.workflow_id
+WHERE c.incident_id = i.id
+  AND c.active = true
+  AND i.status = 'failed'
+  AND w.status IN ('ERROR', 'CANCELLED', 'MAX_RECOVERY_ATTEMPTS_EXCEEDED')`); err != nil {
+		return TerminalInvestigationReconciliation{}, fmt.Errorf("reconcile terminal incident correlation: %w", err)
+	}
+	leaseResult, err := tx.Exec(ctx, `
+UPDATE nerv.investigation_admission_leases l
+SET released_at = now()
+FROM dbos.workflow_status w
+WHERE l.workflow_id = w.workflow_uuid
+  AND l.released_at IS NULL
+  AND w.status IN ('ERROR', 'CANCELLED', 'MAX_RECOVERY_ATTEMPTS_EXCEEDED')`)
+	if err != nil {
+		return TerminalInvestigationReconciliation{}, fmt.Errorf("reconcile terminal investigation lease: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return TerminalInvestigationReconciliation{}, fmt.Errorf("commit terminal investigation reconciliation: %w", err)
+	}
+	return TerminalInvestigationReconciliation{IncidentsFailed: incidentResult.RowsAffected(), LeasesReleased: leaseResult.RowsAffected()}, nil
+}
+
 func (p *Postgres) migrate(ctx context.Context) error {
 	conn, err := p.pool.Acquire(ctx)
 	if err != nil {
@@ -519,7 +570,8 @@ func (p *Postgres) SetStatus(ctx context.Context, incidentID, status string) err
 	if result.RowsAffected() == 0 {
 		return fmt.Errorf("incident %q not found", incidentID)
 	}
-	if status == "completed" {
+	switch status {
+	case "completed":
 		_, err = p.pool.Exec(ctx, `
 UPDATE nerv.incident_correlations
 SET active = false,
@@ -528,6 +580,16 @@ SET active = false,
 WHERE incident_id = $1`, incidentID)
 		if err != nil {
 			return fmt.Errorf("complete incident correlation: %w", err)
+		}
+	case "failed":
+		_, err = p.pool.Exec(ctx, `
+UPDATE nerv.incident_correlations
+SET active = false,
+    cooldown_until = NULL,
+    updated_at = now()
+WHERE incident_id = $1`, incidentID)
+		if err != nil {
+			return fmt.Errorf("fail incident correlation: %w", err)
 		}
 	}
 	return nil

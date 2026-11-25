@@ -244,6 +244,85 @@ func TestRemediationConcurrentDecisionHasSingleWinner(t *testing.T) {
 	}
 }
 
+func TestFailedIncidentReleasesCorrelationForRetry(t *testing.T) {
+	postgres := openIntegrationPostgres(t)
+	ctx := context.Background()
+	incidentID := uuid.NewString()
+	workflowID := "workflow-" + incidentID
+	if _, err := postgres.pool.Exec(ctx, `INSERT INTO nerv.incidents (id, workflow_id, source, question, status) VALUES ($1, $2, $3, 'test', 'running')`, incidentID, workflowID, investigation.SourceKubernetesDetector); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := postgres.pool.Exec(ctx, `INSERT INTO nerv.incident_correlations (correlation_key, incident_id, active, cooldown_seconds) VALUES ($1, $2, true, 600)`, "correlation-"+incidentID, incidentID); err != nil {
+		t.Fatal(err)
+	}
+	if err := postgres.SetStatus(ctx, incidentID, "failed"); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	var active bool
+	var cooldown *time.Time
+	if err := postgres.pool.QueryRow(ctx, `
+SELECT i.status, c.active, c.cooldown_until
+FROM nerv.incidents i
+JOIN nerv.incident_correlations c ON c.incident_id = i.id
+WHERE i.id = $1`, incidentID).Scan(&status, &active, &cooldown); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || active || cooldown != nil {
+		t.Fatalf("status=%q active=%v cooldown=%v", status, active, cooldown)
+	}
+}
+
+func TestReconcileTerminalInvestigationsRepairsStaleState(t *testing.T) {
+	postgres := openIntegrationPostgres(t)
+	ctx := context.Background()
+	if _, err := postgres.pool.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS dbos`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := postgres.pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS dbos.workflow_status (workflow_uuid text PRIMARY KEY, status text)`); err != nil {
+		t.Fatal(err)
+	}
+	incidentID := uuid.NewString()
+	workflowID := "incident-" + incidentID
+	if _, err := postgres.pool.Exec(ctx, `INSERT INTO nerv.incidents (id, workflow_id, source, question, status) VALUES ($1, $2, $3, 'test', 'running')`, incidentID, workflowID, investigation.SourceKubernetesDetector); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := postgres.pool.Exec(ctx, `INSERT INTO nerv.incident_correlations (correlation_key, incident_id, active, cooldown_seconds) VALUES ($1, $2, true, 600)`, "correlation-"+incidentID, incidentID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := postgres.pool.Exec(ctx, `INSERT INTO nerv.investigation_admission_leases (workflow_id, source, expires_at) VALUES ($1, $2, now() + interval '10 minutes')`, workflowID, investigation.SourceKubernetesDetector); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := postgres.pool.Exec(ctx, `INSERT INTO dbos.workflow_status (workflow_uuid, status) VALUES ($1, 'ERROR') ON CONFLICT (workflow_uuid) DO UPDATE SET status = EXCLUDED.status`, workflowID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = postgres.pool.Exec(context.Background(), `DELETE FROM dbos.workflow_status WHERE workflow_uuid = $1`, workflowID)
+	})
+
+	reconciled, err := postgres.ReconcileTerminalInvestigations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reconciled.IncidentsFailed != 1 || reconciled.LeasesReleased != 1 {
+		t.Fatalf("reconciled = %+v", reconciled)
+	}
+	var status string
+	var active bool
+	var releasedAt *time.Time
+	if err := postgres.pool.QueryRow(ctx, `
+SELECT i.status, c.active, l.released_at
+FROM nerv.incidents i
+JOIN nerv.incident_correlations c ON c.incident_id = i.id
+JOIN nerv.investigation_admission_leases l ON l.workflow_id = i.workflow_id
+WHERE i.id = $1`, incidentID).Scan(&status, &active, &releasedAt); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || active || releasedAt == nil {
+		t.Fatalf("status=%q active=%v released_at=%v", status, active, releasedAt)
+	}
+}
+
 func TestAdmissionEnforcesGlobalConcurrencyAndRate(t *testing.T) {
 	postgres := openIntegrationPostgres(t)
 	ctx := context.Background()
