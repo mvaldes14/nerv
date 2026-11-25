@@ -212,6 +212,8 @@ func (e *AdmissionError) Error() string {
 	return "investigation admission denied: " + e.Reason
 }
 
+var ErrInvestigationNotRunning = errors.New("investigation is not running")
+
 type Store interface {
 	Ping(ctx context.Context) error
 	SaveIncident(ctx context.Context, workflowID string, req Request, status string) error
@@ -225,6 +227,7 @@ type Store interface {
 	ReleaseIncident(ctx context.Context, correlationKey, incidentID string) error
 	AdmitInvestigation(ctx context.Context, workflowID, source string, policy AdmissionPolicy) (AdmissionSnapshot, error)
 	ReleaseInvestigation(ctx context.Context, workflowID string) (int, error)
+	FailRunningInvestigation(ctx context.Context, incidentID, workflowID string) (int, error)
 }
 
 type Notifier interface {
@@ -259,6 +262,8 @@ type Service struct {
 	agentModel       string
 	incidentCooldown time.Duration
 	admissionPolicy  AdmissionPolicy
+	listWorkflows    func(dbos.Client, ...dbos.ListWorkflowsOption) ([]dbos.WorkflowStatus, error)
+	cancelWorkflow   func(dbos.Client, string, ...dbos.CancelWorkflowOption) error
 }
 
 func NewService(deps Dependencies) (*Service, error) {
@@ -298,6 +303,8 @@ func NewService(deps Dependencies) (*Service, error) {
 		agentModel:       deps.AgentModel,
 		incidentCooldown: deps.IncidentCooldown,
 		admissionPolicy:  admission,
+		listWorkflows:    dbos.ListWorkflows,
+		cancelWorkflow:   dbos.CancelWorkflow,
 	}
 	dbos.RegisterWorkflow(deps.DBOS, s.Investigate,
 		dbos.WithInstance(s),
@@ -380,6 +387,44 @@ func (s *Service) Ask(ctx context.Context, req Request) (Finding, error) {
 }
 
 func (s *Service) Get(ctx context.Context, id string) (Investigation, error) {
+	return s.store.GetInvestigation(ctx, id)
+}
+
+func (s *Service) Cancel(ctx context.Context, id string) (Investigation, error) {
+	detail, err := s.store.GetInvestigation(ctx, id)
+	if err != nil {
+		return Investigation{}, err
+	}
+	if detail.Incident.Status != "running" {
+		return Investigation{}, ErrInvestigationNotRunning
+	}
+	workflowID := detail.Incident.WorkflowID
+	workflows, err := s.listWorkflows(s.dbos,
+		dbos.WithFilterWorkflowIDs(workflowID),
+		dbos.WithFilterLoadInput(false),
+		dbos.WithFilterLoadOutput(false),
+	)
+	if err != nil {
+		return Investigation{}, fmt.Errorf("read workflow status: %w", err)
+	}
+	if len(workflows) == 0 {
+		return Investigation{}, fmt.Errorf("workflow %q not found", workflowID)
+	}
+	switch workflows[0].Status {
+	case dbos.WorkflowStatusError, dbos.WorkflowStatusCancelled, dbos.WorkflowStatusMaxRecoveryAttemptsExceeded:
+		// Workflow is already terminal; repair stale NERV state below.
+	case dbos.WorkflowStatusSuccess:
+		return Investigation{}, fmt.Errorf("workflow %q already completed successfully", workflowID)
+	default:
+		if err := s.cancelWorkflow(s.dbos, workflowID); err != nil {
+			return Investigation{}, fmt.Errorf("cancel workflow: %w", err)
+		}
+	}
+	active, err := s.store.FailRunningInvestigation(ctx, id, workflowID)
+	if err != nil {
+		return Investigation{}, err
+	}
+	telemetry.RecordAdmissionActive(ctx, active, s.admissionPolicy.MaxConcurrent)
 	return s.store.GetInvestigation(ctx, id)
 }
 

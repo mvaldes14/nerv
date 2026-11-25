@@ -158,6 +158,60 @@ func (p *Postgres) ReleaseInvestigation(ctx context.Context, workflowID string) 
 	return active, nil
 }
 
+func (p *Postgres) FailRunningInvestigation(ctx context.Context, incidentID, workflowID string) (int, error) {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin investigation cancellation transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('nerv-investigation-admission'))`); err != nil {
+		return 0, fmt.Errorf("lock investigation cancellation: %w", err)
+	}
+	var currentWorkflowID, status string
+	err = tx.QueryRow(ctx, `SELECT workflow_id, status FROM nerv.incidents WHERE id = $1 FOR UPDATE`, incidentID).Scan(&currentWorkflowID, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, fmt.Errorf("incident %q not found", incidentID)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read investigation cancellation state: %w", err)
+	}
+	if currentWorkflowID != workflowID {
+		return 0, fmt.Errorf("incident %q workflow changed", incidentID)
+	}
+	switch status {
+	case "running":
+		if _, err := tx.Exec(ctx, `UPDATE nerv.incidents SET status = 'failed', updated_at = now() WHERE id = $1`, incidentID); err != nil {
+			return 0, fmt.Errorf("fail running investigation: %w", err)
+		}
+	case "failed":
+		// A workflow failure cleanup may have raced this operator cancellation.
+	default:
+		return 0, investigation.ErrInvestigationNotRunning
+	}
+	if _, err := tx.Exec(ctx, `
+UPDATE nerv.incident_correlations
+SET active = false,
+    cooldown_until = now() + cooldown_seconds * interval '1 second',
+    updated_at = now()
+WHERE incident_id = $1`, incidentID); err != nil {
+		return 0, fmt.Errorf("cool down cancelled investigation correlation: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+UPDATE nerv.investigation_admission_leases
+SET released_at = now()
+WHERE workflow_id = $1 AND released_at IS NULL`, workflowID); err != nil {
+		return 0, fmt.Errorf("release cancelled investigation admission lease: %w", err)
+	}
+	var active int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM nerv.investigation_admission_leases WHERE released_at IS NULL AND expires_at > now()`).Scan(&active); err != nil {
+		return 0, fmt.Errorf("count active investigation admission leases: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit investigation cancellation: %w", err)
+	}
+	return active, nil
+}
+
 type TerminalInvestigationReconciliation struct {
 	IncidentsFailed int64
 	LeasesReleased  int64

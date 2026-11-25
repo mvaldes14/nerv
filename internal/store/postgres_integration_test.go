@@ -273,6 +273,52 @@ WHERE i.id = $1`, incidentID).Scan(&status, &active, &cooldown); err != nil {
 	}
 }
 
+func TestFailRunningInvestigationUpdatesStateAtomically(t *testing.T) {
+	postgres := openIntegrationPostgres(t)
+	ctx := context.Background()
+	incidentID := uuid.NewString()
+	workflowID := "workflow-" + incidentID
+	if _, err := postgres.pool.Exec(ctx, `INSERT INTO nerv.incidents (id, workflow_id, source, question, status) VALUES ($1, $2, $3, 'test', 'running')`, incidentID, workflowID, investigation.SourceKubernetesDetector); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := postgres.pool.Exec(ctx, `INSERT INTO nerv.incident_correlations (correlation_key, incident_id, active, cooldown_seconds) VALUES ($1, $2, true, 600)`, "correlation-"+incidentID, incidentID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := postgres.pool.Exec(ctx, `INSERT INTO nerv.investigation_admission_leases (workflow_id, source, expires_at) VALUES ($1, $2, now() + interval '10 minutes')`, workflowID, investigation.SourceKubernetesDetector); err != nil {
+		t.Fatal(err)
+	}
+	active, err := postgres.FailRunningInvestigation(ctx, incidentID, workflowID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active != 0 {
+		t.Fatalf("active leases = %d", active)
+	}
+	var status string
+	var correlationActive bool
+	var cooldown, releasedAt *time.Time
+	if err := postgres.pool.QueryRow(ctx, `
+SELECT i.status, c.active, c.cooldown_until, l.released_at
+FROM nerv.incidents i
+JOIN nerv.incident_correlations c ON c.incident_id = i.id
+JOIN nerv.investigation_admission_leases l ON l.workflow_id = i.workflow_id
+WHERE i.id = $1`, incidentID).Scan(&status, &correlationActive, &cooldown, &releasedAt); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || correlationActive || cooldown == nil || !cooldown.After(time.Now()) || releasedAt == nil {
+		t.Fatalf("status=%q active=%v cooldown=%v released_at=%v", status, correlationActive, cooldown, releasedAt)
+	}
+	if _, err := postgres.FailRunningInvestigation(ctx, incidentID, workflowID); err != nil {
+		t.Fatalf("idempotent cancellation error = %v", err)
+	}
+	if _, err := postgres.pool.Exec(ctx, `UPDATE nerv.incidents SET status = 'completed' WHERE id = $1`, incidentID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := postgres.FailRunningInvestigation(ctx, incidentID, workflowID); !errors.Is(err, investigation.ErrInvestigationNotRunning) {
+		t.Fatalf("completed cancellation error = %v", err)
+	}
+}
+
 func TestReconcileTerminalInvestigationsRepairsStaleState(t *testing.T) {
 	postgres := openIntegrationPostgres(t)
 	ctx := context.Background()
