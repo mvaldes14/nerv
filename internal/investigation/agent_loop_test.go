@@ -234,6 +234,92 @@ func TestAgentLoopLaunchesToolsUpToConcurrencyCap(t *testing.T) {
 	}
 }
 
+func TestAgentLoopSynthesizesAfterToolBudgetExhausted(t *testing.T) {
+	service := &Service{tools: markerToolExecutor{}, agentProvider: "test", agentModel: "model"}
+	budget := defaultTestBudget()
+	budget.MaxRounds = 3
+	budget.MaxToolCalls = 1
+	round := 0
+	modelStep := func(_ context.Context, _ int, _ time.Duration, request AgentRequest) (AgentResponse, error) {
+		round++
+		if round == 1 {
+			if len(request.Tools) != 1 || request.ToolChoice != "auto" {
+				t.Fatalf("first round must allow tools: %#v", request)
+			}
+			return AgentResponse{Message: AgentMessage{Role: "assistant", ToolCalls: []ToolCall{
+				{ID: "one", Type: "function", Function: ToolCallFunction{Name: "list_workloads", Arguments: `{}`}},
+				{ID: "two", Type: "function", Function: ToolCallFunction{Name: "list_workloads", Arguments: `{"namespace":"apps"}`}},
+			}}, Usage: TokenUsage{TotalTokens: 10}}, nil
+		}
+		if len(request.Tools) != 0 || request.ToolChoice != "none" {
+			t.Fatalf("synthesis round must disable tools: %#v", request)
+		}
+		joined := ""
+		for _, message := range request.Messages {
+			joined += message.Content + "\n"
+		}
+		if !strings.Contains(joined, "tool call budget exhausted") || !strings.Contains(joined, "Tool execution is finished") {
+			t.Fatalf("synthesis context missing budget evidence: %s", joined)
+		}
+		return AgentResponse{Message: AgentMessage{Role: "assistant", Content: `{"answer":"One workload was inspected before the tool limit.","confidence":"low","uncertainty":["Additional workloads were not inspected."],"recommended_action":"Review remaining workloads manually.","evidence_used":["list_workloads"]}`}, Usage: TokenUsage{TotalTokens: 20}}, nil
+	}
+	executions := 0
+	toolStep := func(_ context.Context, _ int, _ time.Duration, call ToolCall) (<-chan dbos.StepOutcome[ToolResult], error) {
+		executions++
+		return completedTool(ToolResult{CallID: call.ID, Name: call.Function.Name, Content: `{"ok":true,"result":[]}`}), nil
+	}
+	generation, err := service.runAgentLoopWithSteps(context.Background(), Request{Question: "inspect apps"}, Decision{Action: "investigate"}, Evidence{Summary: "inspect apps"}, testAgentState(budget), modelStep, toolStep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executions != 1 || generation.Answer != "One workload was inspected before the tool limit." {
+		t.Fatalf("executions=%d generation=%#v", executions, generation)
+	}
+	if generation.Budget.ToolCallsUsed != 1 || generation.Budget.RoundsUsed != 2 || generation.Budget.StopReason != "" {
+		t.Fatalf("unexpected budget: %#v", generation.Budget)
+	}
+}
+
+func TestAgentLoopReservesLastRoundForSynthesis(t *testing.T) {
+	service := &Service{tools: markerToolExecutor{}, agentProvider: "test", agentModel: "model"}
+	budget := defaultTestBudget()
+	budget.MaxRounds = 1
+	modelStep := func(_ context.Context, _ int, _ time.Duration, request AgentRequest) (AgentResponse, error) {
+		if len(request.Tools) != 0 || request.ToolChoice != "none" {
+			t.Fatalf("last round must be synthesis-only: %#v", request)
+		}
+		return AgentResponse{Message: AgentMessage{Role: "assistant", Content: `{"answer":"No tools were run.","confidence":"unknown","uncertainty":["No evidence tools were available within the round budget."],"recommended_action":"Increase rounds if tool evidence is required.","evidence_used":[]}`}, Usage: TokenUsage{TotalTokens: 10}}, nil
+	}
+	generation, err := service.runAgentLoopWithSteps(context.Background(), Request{Question: "test"}, Decision{Action: "investigate"}, Evidence{Summary: "test"}, testAgentState(budget), modelStep, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if generation.Answer != "No tools were run." || generation.Budget.StopReason != "" {
+		t.Fatalf("unexpected generation: %#v", generation)
+	}
+}
+
+func TestAgentLoopRejectsToolCallsDuringSynthesisRound(t *testing.T) {
+	service := &Service{tools: markerToolExecutor{}, agentProvider: "test", agentModel: "model"}
+	budget := defaultTestBudget()
+	budget.MaxRounds = 1
+	modelStep := func(_ context.Context, _ int, _ time.Duration, request AgentRequest) (AgentResponse, error) {
+		if len(request.Tools) != 0 || request.ToolChoice != "none" {
+			t.Fatalf("last round must be synthesis-only: %#v", request)
+		}
+		return AgentResponse{Message: AgentMessage{Role: "assistant", ToolCalls: []ToolCall{{
+			ID: "ignored-choice", Type: "function", Function: ToolCallFunction{Name: "list_workloads", Arguments: `{}`},
+		}}}, Usage: TokenUsage{TotalTokens: 10}}, nil
+	}
+	generation, err := service.runAgentLoopWithSteps(context.Background(), Request{Question: "test"}, Decision{Action: "investigate"}, Evidence{Summary: "test"}, testAgentState(budget), modelStep, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if generation.Budget.StopReason != "tool_call_after_tools_disabled" || generation.Budget.ToolCallsUsed != 0 {
+		t.Fatalf("unexpected generation: %#v", generation)
+	}
+}
+
 func TestAgentLoopStopsAtBudgets(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -242,18 +328,6 @@ func TestAgentLoopStopsAtBudgets(t *testing.T) {
 		response   AgentResponse
 		stopReason string
 	}{
-		{
-			name:   "tool calls",
-			budget: func() AgentBudget { b := defaultTestBudget(); b.MaxToolCalls = 1; return b }(),
-			response: AgentResponse{
-				Message: AgentMessage{Role: "assistant", ToolCalls: []ToolCall{
-					{ID: "1", Type: "function", Function: ToolCallFunction{Name: "a", Arguments: `{}`}},
-					{ID: "2", Type: "function", Function: ToolCallFunction{Name: "b", Arguments: `{}`}},
-				}},
-				Usage: TokenUsage{TotalTokens: 1},
-			},
-			stopReason: "tool_call_limit",
-		},
 		{name: "tokens", budget: func() AgentBudget { b := defaultTestBudget(); b.MaxTokens = 10; return b }(), response: AgentResponse{Message: AgentMessage{Role: "assistant", Content: `{"answer":"done","confidence":"high","uncertainty":[],"recommended_action":"none","evidence_used":[]}`}, Usage: TokenUsage{TotalTokens: 11}}, stopReason: "token_limit"},
 		{name: "cost", budget: func() AgentBudget {
 			b := defaultTestBudget()

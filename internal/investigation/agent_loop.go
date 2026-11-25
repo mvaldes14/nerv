@@ -118,10 +118,18 @@ func (s *Service) runAgentLoopWithSteps(workflowSpan context.Context, req Reques
 		if maxOutputTokens <= 0 {
 			return stop("token_limit"), nil
 		}
+		tools := definitions
+		toolChoice := any("auto")
+		toolsAvailable := round < limits.MaxRounds && budget.ToolCallsUsed < limits.MaxToolCalls
+		if !toolsAvailable {
+			tools = nil
+			toolChoice = "none"
+			messages = append(messages, AgentMessage{Role: "user", Content: "Tool execution is finished. Return the required structured finding now using only collected evidence. State capability gaps and uncertainty explicitly; do not request more tools."})
+		}
 		response, err := modelStep(agentCtx, round, callTimeout, AgentRequest{
 			Messages:        messages,
-			Tools:           definitions,
-			ToolChoice:      "auto",
+			Tools:           tools,
+			ToolChoice:      toolChoice,
 			ResponseFormat:  finalResponseFormat(),
 			MaxOutputTokens: min(maxOutputTokens, 2048),
 		})
@@ -177,10 +185,11 @@ func (s *Service) runAgentLoopWithSteps(workflowSpan context.Context, req Reques
 			return stop("token_limit"), nil
 		}
 		calls := response.Message.ToolCalls
-		remainingToolCalls := limits.MaxToolCalls - budget.ToolCallsUsed
-		if len(calls) > remainingToolCalls {
-			budget.ToolCallsUsed = limits.MaxToolCalls
-			return stop("tool_call_limit"), nil
+		if len(calls) > 0 && !toolsAvailable {
+			return stop("tool_call_after_tools_disabled"), nil
+		}
+		if len(calls) > 0 && toolStep == nil {
+			return Generation{}, fmt.Errorf("tool step is required when the model requests tools")
 		}
 		for base := 0; base < len(calls); base += max(limits.ToolConcurrency, 1) {
 			end := min(base+max(limits.ToolConcurrency, 1), len(calls))

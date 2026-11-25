@@ -181,6 +181,15 @@ func buildService(ctx context.Context, cfg config.Config, logger *slog.Logger) (
 		cleanup()
 		return nil, nil, nil, nil, fmt.Errorf("launch DBOS: %w", err)
 	}
+	reconciled, err := postgres.ReconcileTerminalInvestigations(ctx)
+	if err != nil {
+		dbos.Shutdown(dbosCtx, 10*time.Second)
+		cleanup()
+		return nil, nil, nil, nil, fmt.Errorf("reconcile terminal investigations: %w", err)
+	}
+	if reconciled.IncidentsFailed > 0 || reconciled.LeasesReleased > 0 {
+		logger.Warn("reconciled terminal investigations", "incidents_failed", reconciled.IncidentsFailed, "leases_released", reconciled.LeasesReleased)
+	}
 	return svc, remediationSvc, kubeClient, func() {
 		dbos.Shutdown(dbosCtx, 10*time.Second)
 		postgres.Close()

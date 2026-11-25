@@ -437,7 +437,31 @@ func (s *Service) Ready(ctx context.Context) error {
 func (s *Service) Investigate(ctx dbos.Context, req Request) (finding Finding, workflowErr error) {
 	workflowID, _ := dbos.GetWorkflowID(ctx)
 	agentCtx, agentSpan := telemetry.StartWorkflow(context.Background(), s.agentProvider, s.agentModel, req.TraceParent, req.TraceState)
-	defer func() { agentSpan.End(workflowErr, "") }()
+	incidentPersisted := false
+	incidentCompleted := false
+	defer func() {
+		if workflowErr != nil {
+			if incidentPersisted && !incidentCompleted {
+				_, cleanupErr := dbos.RunAsStep(ctx, func(stepCtx context.Context) (string, error) {
+					return "failed", s.store.SetStatus(stepCtx, req.ID, "failed")
+				}, dbos.WithStepName("fail-incident"), dbos.WithStepMaxRetries(3))
+				if cleanupErr != nil {
+					workflowErr = errors.Join(workflowErr, fmt.Errorf("mark investigation failed: %w", cleanupErr))
+				}
+			}
+			_, releaseErr := dbos.RunAsStep(ctx, func(stepCtx context.Context) (string, error) {
+				active, err := s.store.ReleaseInvestigation(stepCtx, workflowID)
+				if err == nil {
+					telemetry.RecordAdmissionActive(stepCtx, active, s.admissionPolicy.MaxConcurrent)
+				}
+				return "released", err
+			}, dbos.WithStepName("release-admission-lease-on-error"), dbos.WithStepMaxRetries(3))
+			if releaseErr != nil {
+				workflowErr = errors.Join(workflowErr, fmt.Errorf("release failed investigation admission: %w", releaseErr))
+			}
+		}
+		agentSpan.End(workflowErr, "")
+	}()
 
 	_, err := dbos.RunAsStep(ctx, func(stepCtx context.Context) (string, error) {
 		return "persisted", s.store.SaveIncident(stepCtx, workflowID, req, "running")
@@ -445,6 +469,7 @@ func (s *Service) Investigate(ctx dbos.Context, req Request) (finding Finding, w
 	if err != nil {
 		return Finding{}, err
 	}
+	incidentPersisted = true
 
 	evidence, err := dbos.RunAsStep(ctx, func(stepCtx context.Context) ([]Evidence, error) {
 		base := []Evidence{{Source: req.Source, Summary: triggerSummary(req)}}
@@ -554,6 +579,7 @@ func (s *Service) Investigate(ctx dbos.Context, req Request) (finding Finding, w
 	if err != nil {
 		return Finding{}, err
 	}
+	incidentCompleted = true
 
 	_, err = dbos.RunAsStep(ctx, func(stepCtx context.Context) (string, error) {
 		active, releaseErr := s.store.ReleaseInvestigation(stepCtx, workflowID)
