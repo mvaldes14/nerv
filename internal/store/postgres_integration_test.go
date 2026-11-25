@@ -268,7 +268,7 @@ JOIN nerv.incident_correlations c ON c.incident_id = i.id
 WHERE i.id = $1`, incidentID).Scan(&status, &active, &cooldown); err != nil {
 		t.Fatal(err)
 	}
-	if status != "failed" || active || cooldown != nil {
+	if status != "failed" || active || cooldown == nil || !cooldown.After(time.Now()) {
 		t.Fatalf("status=%q active=%v cooldown=%v", status, active, cooldown)
 	}
 }
@@ -309,17 +309,17 @@ func TestReconcileTerminalInvestigationsRepairsStaleState(t *testing.T) {
 	}
 	var status string
 	var active bool
-	var releasedAt *time.Time
+	var cooldown, releasedAt *time.Time
 	if err := postgres.pool.QueryRow(ctx, `
-SELECT i.status, c.active, l.released_at
+SELECT i.status, c.active, c.cooldown_until, l.released_at
 FROM nerv.incidents i
 JOIN nerv.incident_correlations c ON c.incident_id = i.id
 JOIN nerv.investigation_admission_leases l ON l.workflow_id = i.workflow_id
-WHERE i.id = $1`, incidentID).Scan(&status, &active, &releasedAt); err != nil {
+WHERE i.id = $1`, incidentID).Scan(&status, &active, &cooldown, &releasedAt); err != nil {
 		t.Fatal(err)
 	}
-	if status != "failed" || active || releasedAt == nil {
-		t.Fatalf("status=%q active=%v released_at=%v", status, active, releasedAt)
+	if status != "failed" || active || cooldown == nil || !cooldown.After(time.Now()) || releasedAt == nil {
+		t.Fatalf("status=%q active=%v cooldown=%v released_at=%v", status, active, cooldown, releasedAt)
 	}
 }
 

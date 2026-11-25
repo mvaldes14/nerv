@@ -185,6 +185,12 @@ func (s *Service) runAgentLoopWithSteps(workflowSpan context.Context, req Reques
 			return stop("token_limit"), nil
 		}
 		calls := response.Message.ToolCalls
+		if len(calls) > 0 && !toolsAvailable {
+			return stop("tool_call_after_tools_disabled"), nil
+		}
+		if len(calls) > 0 && toolStep == nil {
+			return Generation{}, fmt.Errorf("tool step is required when the model requests tools")
+		}
 		for base := 0; base < len(calls); base += max(limits.ToolConcurrency, 1) {
 			end := min(base+max(limits.ToolConcurrency, 1), len(calls))
 			type pending struct {

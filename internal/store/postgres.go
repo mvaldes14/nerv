@@ -184,7 +184,9 @@ WHERE i.workflow_id = w.workflow_uuid
 	}
 	if _, err := tx.Exec(ctx, `
 UPDATE nerv.incident_correlations c
-SET active = false, cooldown_until = NULL, updated_at = now()
+SET active = false,
+    cooldown_until = now() + c.cooldown_seconds * interval '1 second',
+    updated_at = now()
 FROM nerv.incidents i
 JOIN dbos.workflow_status w ON w.workflow_uuid = i.workflow_id
 WHERE c.incident_id = i.id
@@ -585,7 +587,7 @@ WHERE incident_id = $1`, incidentID)
 		_, err = p.pool.Exec(ctx, `
 UPDATE nerv.incident_correlations
 SET active = false,
-    cooldown_until = NULL,
+    cooldown_until = now() + cooldown_seconds * interval '1 second',
     updated_at = now()
 WHERE incident_id = $1`, incidentID)
 		if err != nil {

@@ -299,6 +299,27 @@ func TestAgentLoopReservesLastRoundForSynthesis(t *testing.T) {
 	}
 }
 
+func TestAgentLoopRejectsToolCallsDuringSynthesisRound(t *testing.T) {
+	service := &Service{tools: markerToolExecutor{}, agentProvider: "test", agentModel: "model"}
+	budget := defaultTestBudget()
+	budget.MaxRounds = 1
+	modelStep := func(_ context.Context, _ int, _ time.Duration, request AgentRequest) (AgentResponse, error) {
+		if len(request.Tools) != 0 || request.ToolChoice != "none" {
+			t.Fatalf("last round must be synthesis-only: %#v", request)
+		}
+		return AgentResponse{Message: AgentMessage{Role: "assistant", ToolCalls: []ToolCall{{
+			ID: "ignored-choice", Type: "function", Function: ToolCallFunction{Name: "list_workloads", Arguments: `{}`},
+		}}}, Usage: TokenUsage{TotalTokens: 10}}, nil
+	}
+	generation, err := service.runAgentLoopWithSteps(context.Background(), Request{Question: "test"}, Decision{Action: "investigate"}, Evidence{Summary: "test"}, testAgentState(budget), modelStep, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if generation.Budget.StopReason != "tool_call_after_tools_disabled" || generation.Budget.ToolCallsUsed != 0 {
+		t.Fatalf("unexpected generation: %#v", generation)
+	}
+}
+
 func TestAgentLoopStopsAtBudgets(t *testing.T) {
 	tests := []struct {
 		name       string
