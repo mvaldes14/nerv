@@ -91,6 +91,7 @@
   function text(tag, value, className) {
     const node = document.createElement(tag);
     if (className) node.className = className;
+    // Evidence is untrusted. textContent keeps all rendered values inert.
     node.textContent = value ?? '';
     return node;
   }
@@ -299,7 +300,7 @@
 
   function renderIncidentDetail(data) {
     const incident = data.incident;
-    const finding = data.finding;
+    const finding = data.finding ?? {};
     incidentDetail.replaceChildren();
     const heading = document.createElement('div');
     heading.className = 'section-heading';
