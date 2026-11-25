@@ -41,7 +41,7 @@ button.secondary { color: var(--text); background: #182334; border: 1px solid va
 .login-form label { grid-column: 1 / -1; }
 .login-form input { margin: 0; }
 .login-form .status-line { grid-column: 1 / -1; }
-.tabs { display: flex; gap: 8px; padding: 8px; margin-bottom: 22px; position: sticky; top: 94px; z-index: 4; }
+.tabs { display: flex; gap: 8px; padding: 8px; margin-bottom: 22px; position: static; }
 .tab { color: var(--muted); background: transparent; border: 1px solid transparent; min-width: 120px; }
 .tab:hover { color: var(--text); background: #182334; }
 .tab.active { color: #16090c; background: linear-gradient(120deg, var(--accent), var(--accent-2)); }
@@ -62,7 +62,7 @@ button.secondary { color: var(--text); background: #182334; border: 1px solid va
 .conversation-form { padding-top: 18px; border-top: 1px solid var(--line); }
 .workspace { display: grid; grid-template-columns: minmax(330px, .85fr) minmax(480px, 1.5fr); gap: 22px; align-items: start; }
 .history, .detail { padding: 20px; min-height: 580px; }
-.history { position: sticky; top: 100px; }
+.history { position: static; }
 .filters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
 .filters input, .filters select { margin: 6px 0 0; }
 .filters label { display: block; }
@@ -82,10 +82,32 @@ button.secondary { color: var(--text); background: #182334; border: 1px solid va
 .detail-section:first-of-type { margin-top: 20px; }
 .detail-section h3 { font-size: .82rem; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); }
 .output { white-space: pre-wrap; overflow-wrap: anywhere; padding: 14px; border-radius: 10px; background: #080e17; border-left: 3px solid var(--accent); line-height: 1.55; }
+.recommendation-output { border-left-color: var(--accent-2); font-weight: 650; }
+.evidence-disclosure { padding-bottom: 18px; }
+.evidence-disclosure > summary { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; color: var(--muted); cursor: pointer; font-size: .82rem; font-weight: 750; text-transform: uppercase; letter-spacing: .1em; list-style: none; }
+.evidence-disclosure > summary::-webkit-details-marker { display: none; }
+.evidence-disclosure > summary::before { content: "▸"; color: var(--accent-2); }
+.evidence-disclosure > summary:hover { color: var(--text); }
+.evidence-disclosure[open] > summary { margin-bottom: 8px; }
+.evidence-disclosure[open] > summary::before { content: "▾"; }
+.evidence-count { color: var(--accent-2); font-size: .7rem; letter-spacing: normal; text-transform: none; }
 .evidence { display: grid; gap: 10px; }
-.evidence-item { padding: 13px; background: #0b121d; border: 1px solid var(--line); border-radius: 9px; }
-.evidence-item strong { color: var(--accent-2); font-size: .77rem; }
-.evidence-item p { white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0 0; color: #cbd5e1; }
+.evidence-item { padding: 13px; background: #0b121d; border: 1px solid var(--line); border-radius: 9px; min-width: 0; }
+.evidence-item > strong { color: var(--accent-2); font-size: .77rem; }
+.evidence-text { white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0 0; color: #cbd5e1; }
+.structured-content { margin-top: 10px; color: #cbd5e1; }
+.structured-object { display: grid; gap: 6px; margin: 0; }
+.structured-row { display: grid; grid-template-columns: minmax(120px, .35fr) minmax(0, 1fr); gap: 10px; padding: 7px 0; border-top: 1px solid rgba(37,50,71,.65); word-break: break-word; }
+.structured-row:first-child { border-top: 0; padding-top: 0; }
+.structured-row dt { color: var(--muted); font-size: .74rem; font-weight: 700; overflow-wrap: anywhere; }
+.structured-row dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.structured-list { display: grid; gap: 8px; margin: 0; padding-left: 22px; }
+.structured-list > li { padding-left: 3px; }
+.structured-boolean, .structured-number { color: var(--good); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.structured-null, .structured-empty { color: var(--muted); font-style: italic; }
+.structured-overflow, .raw-json pre { margin: 8px 0 0; padding: 12px; overflow: auto; white-space: pre; color: #d6deeb; background: #060b12; border: 1px solid var(--line); border-radius: 8px; font-size: .76rem; }
+.raw-json { margin-top: 12px; }
+.raw-json summary { color: var(--muted); cursor: pointer; font-size: .72rem; font-weight: 700; }
 .decision-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
 .fact { background: #0b121d; padding: 12px; border-radius: 9px; }
 .fact span { color: var(--muted); display: block; font-size: .72rem; margin-bottom: 4px; }
@@ -98,5 +120,5 @@ button.secondary { color: var(--text); background: #182334; border: 1px solid va
 #remediation-status { margin: 8px 0 14px; padding: 10px 12px; color: var(--text); background: #090f19; border: 1px solid var(--line); border-radius: 8px; }
 .empty-state { max-width: 520px; margin: 120px auto; text-align: center; color: var(--muted); }
 .error { color: #ff8797; }
-@media (max-width: 900px) { header { position: static; align-items: stretch; flex-direction: column; } .tabs { position: static; overflow-x: auto; } .auth-form { grid-template-columns: 1fr auto auto; } .workspace { grid-template-columns: 1fr; } .history { position: static; } .target-grid { grid-template-columns: 1fr 1fr; } .proposal-decision { grid-template-columns: 1fr 1fr; } .proposal-decision input, .proposal-decision textarea { grid-column: 1 / -1; } }
+@media (max-width: 900px) { header { position: static; align-items: stretch; flex-direction: column; } .tabs { overflow-x: auto; } .auth-form { grid-template-columns: 1fr auto auto; } .workspace { grid-template-columns: 1fr; } .target-grid { grid-template-columns: 1fr 1fr; } .proposal-decision { grid-template-columns: 1fr 1fr; } .proposal-decision input, .proposal-decision textarea { grid-column: 1 / -1; } .structured-row { grid-template-columns: 1fr; gap: 4px; } }
 @media (max-width: 560px) { .login-form { grid-template-columns: 1fr; } .login-form label, .login-form .status-line { grid-column: 1; } .session-controls { justify-content: space-between; } .tab { min-width: 100px; } .auth-form { grid-template-columns: 1fr 1fr; } .auth-form label, .auth-form input { grid-column: 1 / -1; } .auth-form button { grid-row: auto; } .target-grid, .filters, .decision-grid { grid-template-columns: 1fr; } }
