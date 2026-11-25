@@ -314,6 +314,34 @@
     meta.append(text('span', `ID ${incident.id}`), text('span', targetName(incident.target)), text('span', `Created ${formatTime(incident.created_at)}`), text('span', `Updated ${formatTime(incident.updated_at)}`));
     incidentDetail.append(meta);
 
+    if (incident.status === 'running') {
+      const controls = section('Operational controls');
+      controls.append(text('p', 'Cancel DBOS execution, mark this investigation failed, release its admission lease, and apply detector cooldown.', 'status-line'));
+      const actions = document.createElement('div');
+      actions.className = 'form-actions';
+      const cancel = text('button', 'Cancel investigation', 'danger');
+      cancel.type = 'button';
+      const result = text('span', '', 'status-line');
+      cancel.addEventListener('click', async () => {
+        if (!window.confirm(`Cancel investigation ${incident.id}? This marks it failed and cannot be resumed from the operator UI.`)) return;
+        cancel.disabled = true;
+        result.textContent = 'Cancelling investigation…';
+        result.className = 'status-line';
+        try {
+          const updated = await api(`/investigations/${encodeURIComponent(incident.id)}/cancel`, {method: 'POST'});
+          renderIncidentDetail(updated);
+          await loadIncidents();
+        } catch (error) {
+          result.textContent = error.message;
+          result.className = 'status-line error';
+          cancel.disabled = false;
+        }
+      });
+      actions.append(cancel, result);
+      controls.append(actions);
+      incidentDetail.append(controls);
+    }
+
     const suppressed = finding?.decision?.action === 'suppress';
     const outcome = section(suppressed ? 'Policy outcome' : 'Conclusion');
     outcome.append(text('div', finding?.answer || 'Finding not available while investigation is running.', 'output'));

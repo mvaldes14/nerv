@@ -16,13 +16,15 @@ import (
 )
 
 type fakeInvestigationService struct {
-	askRequest investigation.Request
-	askFinding investigation.Finding
-	askErr     error
-	acceptErr  error
-	listFilter investigation.IncidentFilter
-	page       investigation.IncidentPage
-	detail     investigation.Investigation
+	askRequest  investigation.Request
+	askFinding  investigation.Finding
+	askErr      error
+	acceptErr   error
+	listFilter  investigation.IncidentFilter
+	page        investigation.IncidentPage
+	detail      investigation.Investigation
+	cancelID    string
+	cancelError error
 }
 
 func (f *fakeInvestigationService) Ready(context.Context) error { return nil }
@@ -35,6 +37,10 @@ func (f *fakeInvestigationService) Accept(context.Context, investigation.Request
 }
 func (f *fakeInvestigationService) Get(context.Context, string) (investigation.Investigation, error) {
 	return f.detail, nil
+}
+func (f *fakeInvestigationService) Cancel(_ context.Context, id string) (investigation.Investigation, error) {
+	f.cancelID = id
+	return f.detail, f.cancelError
 }
 func (f *fakeInvestigationService) List(_ context.Context, filter investigation.IncidentFilter) (investigation.IncidentPage, error) {
 	f.listFilter = filter
@@ -167,6 +173,41 @@ func TestInvestigationDetailPreservesSuppressionDecisionMetadata(t *testing.T) {
 	}
 	if body.Finding.Decision.Action != "suppress" || body.Finding.Decision.Reason == "" || body.Finding.Decision.Provider != "laya" || body.Finding.Decision.RequestID != "req-1" {
 		t.Fatalf("decision = %+v", body.Finding.Decision)
+	}
+}
+
+func TestCancelInvestigationRequiresBearerAuthentication(t *testing.T) {
+	handler := NewHandler(Dependencies{Service: &fakeInvestigationService{}, AuthToken: "secret"})
+	req := httptest.NewRequest(http.MethodPost, "/investigations/inc-1/cancel", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestCancelInvestigationReturnsUpdatedDetail(t *testing.T) {
+	service := &fakeInvestigationService{detail: investigation.Investigation{Incident: investigation.IncidentSummary{ID: "inc-1", Status: "failed"}}}
+	handler := NewHandler(Dependencies{Service: service})
+	req := httptest.NewRequest(http.MethodPost, "/investigations/inc-1/cancel", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", response.Code, http.StatusOK, response.Body.String())
+	}
+	if service.cancelID != "inc-1" || !strings.Contains(response.Body.String(), `"status":"failed"`) {
+		t.Fatalf("cancel ID = %q body = %s", service.cancelID, response.Body.String())
+	}
+}
+
+func TestCancelInvestigationRejectsTerminalIncident(t *testing.T) {
+	service := &fakeInvestigationService{cancelError: investigation.ErrInvestigationNotRunning}
+	handler := NewHandler(Dependencies{Service: service})
+	req := httptest.NewRequest(http.MethodPost, "/investigations/inc-1/cancel", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d: %s", response.Code, http.StatusConflict, response.Body.String())
 	}
 }
 

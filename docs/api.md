@@ -208,6 +208,17 @@ Evidence/tool output is returned separately from finding and is explicitly execu
 
 For `suppress`, NERV does not call Agentgateway. It persists a human-readable policy outcome with the reason and available provider/request metadata, and the UI labels it **Policy outcome** rather than model-generated output. A remote `duplicate` classification does not prove that another incident exists. Only PostgreSQL/DBOS correlation can reuse an incident, and NERV never fabricates an incident link from decision metadata.
 
+### `POST /investigations/{id}/cancel`
+
+Cancels a running DBOS workflow, marks the incident `failed`, releases its admission lease, and applies the configured detector cooldown. If DBOS already records the workflow as `ERROR`, `CANCELLED`, or recovery-exhausted, the endpoint repairs stale NERV state without attempting another cancellation. Completed or already-failed incidents return `409 Conflict`.
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/investigations/<incident-id>/cancel \
+  -H 'Authorization: Bearer dev-token' | jq
+```
+
+This operator action is bearer-protected and available through the incident detail view only while persisted incident status is `running`.
+
 ## GitOps remediation proposals
 
 All remediation routes use existing bearer authentication. Proposals are linked to completed incidents with findings and copy selected evidence into immutable snapshots. Only configured targets and `set_workload_replicas/v1` are accepted.

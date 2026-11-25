@@ -25,6 +25,7 @@ type investigationService interface {
 	Ask(context.Context, investigation.Request) (investigation.Finding, error)
 	Accept(context.Context, investigation.Request) (investigation.Accepted, error)
 	Get(context.Context, string) (investigation.Investigation, error)
+	Cancel(context.Context, string) (investigation.Investigation, error)
 	List(context.Context, investigation.IncidentFilter) (investigation.IncidentPage, error)
 	FilterOptions(context.Context) (investigation.IncidentFilterOptions, error)
 }
@@ -84,6 +85,7 @@ func (h *Handler) routes() {
 	h.mux.Handle("GET /investigations", h.requireAuth(http.HandlerFunc(h.listInvestigations)))
 	h.mux.Handle("GET /investigations/filter-options", h.requireAuth(http.HandlerFunc(h.investigationFilterOptions)))
 	h.mux.Handle("GET /investigations/{id}", h.requireAuth(http.HandlerFunc(h.getInvestigation)))
+	h.mux.Handle("POST /investigations/{id}/cancel", h.requireAuth(http.HandlerFunc(h.cancelInvestigation)))
 	h.mux.Handle("POST /investigations/{id}/remediation-proposals", h.requireAuth(http.HandlerFunc(h.createRemediationProposal)))
 	h.mux.Handle("GET /investigations/{id}/remediation-proposals", h.requireAuth(http.HandlerFunc(h.listRemediationProposals)))
 	h.mux.Handle("GET /remediation-proposals", h.requireAuth(http.HandlerFunc(h.listAllRemediationProposals)))
@@ -218,6 +220,25 @@ func (h *Handler) getInvestigation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
+	writeInvestigation(w, detail)
+}
+
+func (h *Handler) cancelInvestigation(w http.ResponseWriter, r *http.Request) {
+	detail, err := h.service.Cancel(r.Context(), r.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, investigation.ErrInvestigationNotRunning) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		h.logger.Error("cancel investigation failed", "incident_id", r.PathValue("id"), "error", err)
+		writeError(w, http.StatusInternalServerError, "cancel investigation failed")
+		return
+	}
+	h.logger.Info("investigation cancelled", "incident_id", detail.Incident.ID, "workflow_id", detail.Incident.WorkflowID)
+	writeInvestigation(w, detail)
+}
+
+func writeInvestigation(w http.ResponseWriter, detail investigation.Investigation) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"incident":      detail.Incident,
 		"status":        detail.Incident.Status,
