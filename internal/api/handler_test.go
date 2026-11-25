@@ -430,7 +430,7 @@ func TestOperatorUIRendersSuppressionAsPolicyOutcome(t *testing.T) {
 			t.Fatalf("app.js must not contain %q", forbidden)
 		}
 	}
-	for _, required := range []string{"loadRemediationQueue", "rendered_diff", "window.confirm", "Approve", "Reject", "Submit GitHub PR", "/auth/check"} {
+	for _, required := range []string{"loadRemediationQueue", "rendered_diff", "window.confirm", "Approve", "Reject", "Submit GitHub PR", "/auth/check", "evidenceDisclosure", "renderStructuredValue", "Recommended action", "Decision and execution details"} {
 		if !strings.Contains(script, required) {
 			t.Errorf("app.js does not contain %q", required)
 		}

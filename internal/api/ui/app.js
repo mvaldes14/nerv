@@ -124,6 +124,82 @@
     return node;
   }
 
+  function parseJSON(value) {
+    if (typeof value !== 'string') return undefined;
+    const trimmed = value.trim();
+    if (!trimmed || (!trimmed.startsWith('{') && !trimmed.startsWith('['))) return undefined;
+    try { return JSON.parse(trimmed); } catch (_) { return undefined; }
+  }
+
+  function formatKey(value) {
+    return String(value).replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+  }
+
+  function renderStructuredValue(value, depth = 0) {
+    if (depth >= 6) return text('pre', JSON.stringify(value, null, 2), 'structured-overflow');
+    if (value === null) return text('span', 'null', 'structured-null');
+    if (Array.isArray(value)) {
+      if (!value.length) return text('span', 'Empty list', 'structured-empty');
+      const list = document.createElement('ol');
+      list.className = 'structured-list';
+      for (const item of value) {
+        const entry = document.createElement('li');
+        entry.append(renderStructuredValue(item, depth + 1));
+        list.append(entry);
+      }
+      return list;
+    }
+    if (typeof value === 'object') {
+      const entries = Object.entries(value);
+      if (!entries.length) return text('span', 'Empty object', 'structured-empty');
+      const object = document.createElement('dl');
+      object.className = 'structured-object';
+      for (const [key, item] of entries) {
+        const row = document.createElement('div');
+        row.className = 'structured-row';
+        row.append(text('dt', formatKey(key)));
+        const content = document.createElement('dd');
+        content.append(renderStructuredValue(item, depth + 1));
+        row.append(content);
+        object.append(row);
+      }
+      return object;
+    }
+    return text('span', String(value), `structured-${typeof value}`);
+  }
+
+  function renderEvidenceContent(value) {
+    const parsed = parseJSON(value);
+    if (parsed === undefined) return text('p', value, 'evidence-text');
+    const content = document.createElement('div');
+    content.className = 'structured-content';
+    content.append(renderStructuredValue(parsed));
+    const raw = document.createElement('details');
+    raw.className = 'raw-json';
+    raw.append(text('summary', 'Show raw JSON'), text('pre', JSON.stringify(parsed, null, 2)));
+    content.append(raw);
+    return content;
+  }
+
+  function evidenceDisclosure(items) {
+    const disclosure = document.createElement('details');
+    disclosure.className = 'detail-section evidence-disclosure';
+    const heading = document.createElement('summary');
+    heading.append(text('span', 'Evidence and tool output'), text('span', `${items.length} item${items.length === 1 ? '' : 's'}`, 'evidence-count'));
+    disclosure.append(heading, text('p', 'Persisted source material and executed tool results. Expand an item to inspect structured output.', 'status-line'));
+    const evidenceList = document.createElement('div');
+    evidenceList.className = 'evidence';
+    for (const item of items) {
+      const node = document.createElement('div');
+      node.className = 'evidence-item';
+      node.append(text('strong', item.source), renderEvidenceContent(item.summary));
+      evidenceList.append(node);
+    }
+    if (!evidenceList.childElementCount) evidenceList.append(text('p', 'No evidence persisted yet.', 'status-line'));
+    disclosure.append(evidenceList);
+    return disclosure;
+  }
+
   function activateTab(name) {
     activeTab = name;
     for (const button of document.querySelectorAll('.tab')) {
@@ -237,37 +313,38 @@
     meta.append(text('span', `ID ${incident.id}`), text('span', targetName(incident.target)), text('span', `Created ${formatTime(incident.created_at)}`), text('span', `Updated ${formatTime(incident.updated_at)}`));
     incidentDetail.append(meta);
 
-    const decision = section('Decision and recommendation');
+    const suppressed = finding?.decision?.action === 'suppress';
+    const outcome = section(suppressed ? 'Policy outcome' : 'Conclusion');
+    outcome.append(text('div', finding?.answer || 'Finding not available while investigation is running.', 'output'));
+    incidentDetail.append(outcome);
+
+    const recommendation = section('Recommended action');
+    recommendation.append(text('div', finding?.recommended_action || 'No recommended action recorded.', 'output recommendation-output'));
+    incidentDetail.append(recommendation);
+
+    const decision = section('Decision and execution details');
     const grid = document.createElement('div');
     grid.className = 'decision-grid';
     grid.append(
+      fact('Confidence', finding?.confidence || 'Unknown / not asserted'),
       fact('Decision action', finding?.decision?.action || 'Pending'),
       fact('Decision provider', finding?.decision?.provider || 'Local NERV policy'),
       fact('Decision reason', finding?.decision?.reason || 'Not recorded'),
       fact('Decision request ID', finding?.decision?.request_id || 'Not provided'),
-      fact('Confidence', finding?.confidence || 'Unknown / not asserted'),
-      fact('Recommended action', finding?.recommended_action || 'Not recorded'),
-      fact('Review required', finding?.decision?.review_required ? 'Yes' : 'No')
+      fact('Review required', finding?.decision?.review_required ? 'Yes' : 'No'),
+      fact('Model provider', finding?.provider || 'Not recorded'),
+      fact('Model', finding?.model || 'Not recorded'),
+      fact('Executed tools', finding?.tools_used?.length ? finding.tools_used.join(', ') : 'None recorded'),
+      fact('Rounds', `${finding?.budget?.rounds_used ?? '—'} / ${finding?.budget?.max_rounds ?? '—'}`),
+      fact('Tool calls', `${finding?.budget?.tool_calls_used ?? '—'} / ${finding?.budget?.max_tool_calls ?? '—'}`),
+      fact('Tokens', `${finding?.budget?.total_tokens ?? '—'} / ${finding?.budget?.max_tokens ?? '—'}`),
+      fact('Budget stop reason', finding?.budget?.stop_reason || 'Completed within budget')
     );
     decision.append(grid);
+    if (!suppressed) decision.append(fact('Uncertainty', finding?.uncertainty?.length ? finding.uncertainty.join(' • ') : 'No structured uncertainty recorded.'));
     incidentDetail.append(decision);
 
-    const outcome = section(finding?.decision?.action === 'suppress' ? 'Policy outcome' : 'Model-generated finding');
-    outcome.append(text('div', finding?.answer || 'Finding not available while investigation is running.', 'output'));
-    incidentDetail.append(outcome);
-
-    const evidence = section('Evidence and tool output');
-    const evidenceList = document.createElement('div');
-    evidenceList.className = 'evidence';
-    for (const item of data.evidence || []) {
-      const node = document.createElement('div');
-      node.className = 'evidence-item';
-      node.append(text('strong', item.source), text('p', item.summary));
-      evidenceList.append(node);
-    }
-    if (!evidenceList.childElementCount) evidenceList.append(text('p', 'No evidence persisted yet.', 'status-line'));
-    evidence.append(evidenceList);
-    incidentDetail.append(evidence);
+    incidentDetail.append(evidenceDisclosure(data.evidence || []));
 
     const notifications = section('Notification state');
     if (!data.notifications?.length) notifications.append(text('p', 'No notification attempts recorded.', 'status-line'));
